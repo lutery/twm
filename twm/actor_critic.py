@@ -12,6 +12,10 @@ import utils
 class ActorCritic(nn.Module):
 
     def __init__(self, config, num_actions, z_dim, h_dim):
+        '''
+        z_dim: todo
+        h_dim:  todo
+        '''
         super().__init__()
         self.config = config
         self.num_actions = num_actions
@@ -20,19 +24,24 @@ class ActorCritic(nn.Module):
         dropout_p = config['ac_dropout']
 
         input_dim = z_dim
+        # todo 这个是输入什么？
         if config['ac_input_h']:
             input_dim += h_dim
 
         self.h_norm = nets.get_norm_1d(config['ac_h_norm'], h_dim)
         self.trunk = nn.Identity()
+        # 这里的动作预测
         self.actor_model = nets.MLP(
             input_dim, config['actor_dims'], num_actions, activation, norm=norm, dropout_p=dropout_p,
             weight_initializer='orthogonal', bias_initializer='zeros')
+        # 这里应该就是对观察的评价
         self.critic_model = nets.MLP(
             input_dim, config['critic_dims'], 1, activation, norm=norm, dropout_p=dropout_p,
             weight_initializer='orthogonal', bias_initializer='zeros')
         if config['critic_target_interval'] > 1:
+            # 注册目标网络
             self.target_critic_model = copy.deepcopy(self.critic_model).requires_grad_(False)
+            # todo是用来做什么的
             self.register_buffer('target_critic_lag', torch.zeros(1, dtype=torch.long))
 
         self.actor_optimizer = utils.AdamOptim(
@@ -69,8 +78,9 @@ class ActorCritic(nn.Module):
         return values
 
     def sync_target(self):
+        # 完全同步到目标网络
         if self.config['critic_target_interval'] > 1:
-            self.target_critic_lag[:] = 0
+            self.target_critic_lag[:] = 0 # 这里把标识设置为0的作用是什么？
             self.target_critic_model.load_state_dict(self.critic_model.state_dict())
 
     def optimize(self, z, h, a, r, g, d, weights):

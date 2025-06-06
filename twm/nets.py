@@ -212,6 +212,10 @@ class MLP(_MultilayerModule):
 
 
 class CNN(_MultilayerModule):
+    '''
+    这里只是覆盖了构造网络的结构
+    总体调用方式在_MultilayerModule中
+    '''
 
     def __init__(self, in_dim, hidden_dims, out_dim, kernel_sizes, strides, paddings, nonlinearity,
                  param=None, norm=None, dropout_p=0, bias=True, padding_mode='zeros', in_shape=None,
@@ -326,12 +330,14 @@ class TransformerXLDecoder(nn.Module):
 
     def __init__(self, decoder_layer, num_layers, max_length, mem_length, batch_first=False):
         super().__init__()
+        # 构建多个transformer解码层
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.num_layers = num_layers
         self.mem_length = mem_length
         self.batch_first = batch_first
 
         self.pos_enc = PositionalEncoding(decoder_layer.dim, max_length, dropout_p=decoder_layer.dropout_p)
+        # todo 这两个参数的作用
         self.u_bias = nn.Parameter(torch.Tensor(decoder_layer.num_heads, decoder_layer.head_dim))
         self.v_bias = nn.Parameter(torch.Tensor(decoder_layer.num_heads, decoder_layer.head_dim))
         nn.init.xavier_uniform_(self.u_bias)
@@ -514,12 +520,17 @@ class PredictionNet(nn.Module):
         self.modality_order = tuple(modality_order)
         self.num_current = num_current
 
+        # embed['in_dim']：观察的特征提取后的维度
+        # embed_dim： 这个潜入维度的作用是啥？todo
+        # 根据之前的设置，先使用MLP进行特征的进一步提取，然后在使用nn.Embedding进行embedding
         self.embeds = nn.ModuleDict({
             name: nn.Embedding(embed['in_dim'], embed_dim) if embed.get('categorical', False) else
             MLP(embed['in_dim'], [], embed_dim, activation, norm=norm, dropout_p=dropout_p, post_activation=True)
             for name, embed in embeds.items()
         })
 
+        # TransformerXl 特征解码层
+        # todo 对比标准的Transformer
         decoder_layer = TransformerXLDecoderLayer(
             embed_dim, feedforward_dim, head_dim, num_heads, activation, dropout_p)
 
@@ -528,6 +539,7 @@ class PredictionNet(nn.Module):
         mem_length = memory_length * num_modalities + self.num_current
         self.transformer = TransformerXLDecoder(decoder_layer, num_layers, max_length, mem_length, batch_first=True)
 
+        # todo 查看如何调用
         self.out_heads = nn.ModuleDict({
             name: MLP(embed_dim, head['hidden_dims'], head['out_dim'], activation, norm=norm, dropout_p=dropout_p,
                       pre_activation=True, final_bias_init=head.get('final_bias_init', None))

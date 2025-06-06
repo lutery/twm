@@ -136,30 +136,40 @@ class ReplayBuffer:
         index = self.size
         if index >= config['buffer_capacity']:
             raise ValueError('Buffer overflow')
-
+        
+        # todo 这里是怎么选择动作的？
         action = policy_fn(index)
         next_obs, reward, terminated, truncated, info = self.env.step(action)
         if terminated or truncated:
             # throws away last obs
+            # 如果游戏结束了，则重置环境，并且设置新的随机种子
             seed = self.prev_seed
             if seed is not None:
                 seed = seed * 3 + 13
                 self.prev_seed = seed
             next_obs, _ = self.env.reset(seed=seed)
 
+        # 存储着连续数据
         self.obs[index + 1] = torch.as_tensor(np.array(next_obs), device=self.device)
+        # 存储缩放后的奖励
         self.rewards[index] = self.reward_transform(reward)
         self.actions[index] = action
         self.terminated[index] = terminated
         self.truncated[index] = truncated
+        # 如果是终止或者截断，则将时间步数重置为0，否则加1
+        # 应该可以用来计算每个episode的长度，区分不同的episode
         self.timesteps[index + 1] = 0 if (terminated or truncated) else (self.timesteps[index] + 1)
 
+        # 增加存储的数据量
         self.size = index + 1
+        # 统计总奖励和当前episode的分数
         self.total_reward += reward
         self.score += reward
         if terminated or truncated:
+            # 记录着每次episode的长度和分数
             self.episode_lengths.append(self.timesteps[index] + 1)
             self.scores.append(self.score)
+            # 重置当前episode的分数
             self.score = 0
 
     def _compute_visit_probs(self, n):

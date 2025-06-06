@@ -136,7 +136,7 @@ class ObservationModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        # todo 看起来是将观察编码、解码的
+        # todo 看起来是将观察编码、解码的维度
         self.z_dim = config['z_categoricals'] * config['z_categories']
 
         h = config['obs_channels']
@@ -291,12 +291,13 @@ class DynamicsModel(nn.Module):
         self.config = config
 
         embeds = {
-            'z': {'in_dim': z_dim, 'categorical': False},
-            'a': {'in_dim': num_actions, 'categorical': True}
+            'z': {'in_dim': z_dim, 'categorical': False}, # 环境的特征维度
+            'a': {'in_dim': num_actions, 'categorical': True} # 动作的特征维度
         }
         modality_order = ['z', 'a']
         num_current = 2
 
+        # todo 
         if config['dyn_input_rewards']:
             embeds['r'] = {'in_dim': 0, 'categorical': False}
             modality_order.append('r')
@@ -307,6 +308,7 @@ class DynamicsModel(nn.Module):
 
         self.modality_order = modality_order
 
+        # todo
         out_heads = {
             'z': {'hidden_dims': config['dyn_z_dims'], 'out_dim': z_dim},
             'r': {'hidden_dims': config['dyn_reward_dims'], 'out_dim': 1, 'final_bias_init': 0.0},
@@ -314,8 +316,10 @@ class DynamicsModel(nn.Module):
                   'final_bias_init': config['env_discount_factor']}
         }
 
+        # 这里可能是环境的记忆维度
         memory_length = config['wm_memory_length']
         max_length = 1 + config['wm_sequence_length']  # 1 for context
+        # todo 预测网络
         self.prediction_net = nets.PredictionNet(
             modality_order, num_current, embeds, out_heads, embed_dim=config['dyn_embed_dim'],
             activation=config['dyn_act'], norm=config['dyn_norm'], dropout_p=config['dyn_dropout'],

@@ -4,7 +4,7 @@ CONFIGS['default'] = {
     # buffer
     'buffer_capacity': 100000,
     'buffer_temperature': 20.0,
-    'buffer_prefill': 5000,
+    'buffer_prefill': 5000, # 训练前需要填充的缓冲区数据大小
 
     # training
     'budget': 1000000000,
@@ -95,5 +95,5 @@ CONFIGS['default'] = {
     'critic_eps': 1e-5,
     'critic_wd': 1e-6,
     'critic_grad_clip': 1,
-    'critic_target_interval': 1
+    'critic_target_interval': 1 # 这里是目标网络的更新频率，1表示每次更新都同步，但是如何设置为1，好像不会创建目标网路
 }

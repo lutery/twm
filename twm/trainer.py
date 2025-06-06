@@ -37,13 +37,15 @@ class Trainer:
         'DOWN' - 向下移动
         '''
         self.action_meanings = self.env.get_action_meanings()
+        # 设置代理器
         self.agent = Agent(config, num_actions).to(config['model_device'])
 
         # metrics that won't be summarized, the last value will be used instead
         except_keys = ['buffer/size', 'buffer/total_reward', 'buffer/num_episodes']
+        # 这里应该是设置了一个指标汇总器，用于收集和汇总训练过程中的指标
         self.summarizer = utils.MetricsSummarizer(except_keys=except_keys)
-        self.last_eval = 0
-        self.total_eval_time = 0
+        self.last_eval = 0 # todo
+        self.total_eval_time = 0 # todo
 
     def print_stats(self):
         count_params = lambda module: sum(p.numel() for p in module.parameters() if p.requires_grad)
@@ -123,6 +125,7 @@ class Trainer:
         return sampler
 
     def run(self):
+        # 这里应该就是训练的主循环
         config = self.config
         replay_buffer = self.replay_buffer
 

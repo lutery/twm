@@ -19,8 +19,8 @@ class ReplayBuffer:
         self.device = torch.device(device)
         self.prev_seed = (config['seed'] + 1) * 7979
         initial_obs, _ = env.reset(seed=self.prev_seed)
-        initial_obs = torch.as_tensor(np.array(initial_obs), device=device)
-        capacity = config['buffer_capacity']
+        initial_obs = torch.as_tensor(np.array(initial_obs), device=device) # 初始的环境大小
+        capacity = config['buffer_capacity'] # 缓冲区的容量
 
         self.obs = torch.zeros((capacity + 1,) + initial_obs.shape, dtype=initial_obs.dtype, device=device)
         self.obs[0] = initial_obs
@@ -38,6 +38,7 @@ class ReplayBuffer:
         self.score = 0
         self.episode_lengths = []
         self.scores = []
+        # 这里看起来是在做奖励的缩放，比如使用tanh将奖励缩放到-1~1之间
         self.reward_transform = utils.create_reward_transform(config['env_reward_transform'])
         self.metrics_num_episodes = 0
 

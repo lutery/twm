@@ -27,6 +27,15 @@ class Trainer:
         self.replay_buffer = ReplayBuffer(config, self.env)
 
         num_actions = self.env.action_space.n
+        # 获取可用动作的描述字符串，比如
+        '''
+        'NOOP' - 不执行任何操作
+        'FIRE' - 发射/开火
+        'UP' - 向上移动
+        'RIGHT' - 向右移动
+        'LEFT' - 向左移动
+        'DOWN' - 向下移动
+        '''
         self.action_meanings = self.env.get_action_meanings()
         self.agent = Agent(config, num_actions).to(config['model_device'])
 
@@ -61,6 +70,7 @@ class Trainer:
             config['game'], noop_max, config['env_frame_skip'], config['env_frame_stack'],
             config['env_frame_size'], config['env_episodic_lives'], config['env_grayscale'], config['env_time_limit'])
         if eval:
+            # 如果是验证模式下，这里还是需要额外包装一个NoAutoReset包装器
             env = utils.NoAutoReset(env)  # must use options={'force': True} to really reset
         return env
 

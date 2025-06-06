@@ -136,6 +136,7 @@ class ObservationModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        # todo 看起来是将观察编码、解码的
         self.z_dim = config['z_categoricals'] * config['z_categories']
 
         h = config['obs_channels']

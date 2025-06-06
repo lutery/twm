@@ -151,6 +151,16 @@ def preprocess_atari_obs(obs, device=None):
 
 def create_atari_env(game, noop_max=30, frame_skip=4, frame_stack=4, frame_size=84,
                      episodic_lives=True, grayscale=True, time_limit=27000):
+    '''
+    跳帧 4
+    随机初始化步数
+    缩放画面尺寸到84
+    灰度化
+    步数限制27000
+    将多个生命包装成独立的生命
+    开火开始游戏
+    帧堆叠：4
+    '''
     env = AtariEnv(rom_name_to_id(game), frameskip=1, repeat_action_probability=0.0)
     env.spec = gym.spec(game + 'NoFrameskip-v4')  # required for AtariPreprocessing
     has_fire_action = env.get_action_meanings()[1] == 'FIRE'
@@ -227,6 +237,9 @@ class EpisodicLives(gym.Wrapper):
 
 
 class NoAutoReset(gym.Wrapper):
+    '''
+    todo 这个包装器的作用是什么？
+    '''
 
     def __init__(self, env):
         super().__init__(env)

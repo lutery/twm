@@ -21,7 +21,7 @@ CONFIGS['default'] = {
     'env_frame_size': 64,
     'env_frame_skip': 4,
     'env_frame_stack': 4,
-    'env_grayscale': True,
+    'env_grayscale': True, # 观察是否事灰度图
     'env_noop_max': 30,
     'env_time_limit': 27000,
     'env_episodic_lives': True,
@@ -30,8 +30,8 @@ CONFIGS['default'] = {
     'env_discount_lambda': 0.95,
 
     # world model
-    'wm_batch_size': 100,
-    'wm_sequence_length': 16,
+    'wm_batch_size': 100, # 每次训练的批次大小
+    'wm_sequence_length': 16, # 每次训练的序列长度
     'wm_train_steps': 1,
     'wm_memory_length': 16,
     'wm_discount_threshold': 0.1,

@@ -11,6 +11,9 @@ from wandb.sdk.data_types.base_types.wb_value import WBValue
 
 
 def update_metrics(metrics, new_metrics, prefix=None):
+    '''
+    将新的指标更新到现有的指标字典中。
+    '''
     def process(key, t):
         if isinstance(t, (int, float)):
             return t
@@ -37,6 +40,50 @@ def combine_metrics(metrics, prefix=None):
     return result
 
 
+'''
+让我分析一下 `mean_metrics` 函数的功能：
+
+### 函数分析
+
+是的，`mean_metrics` 函数的主要功能是计算多个时间点收集的指标的平均值，但有一些特殊情况：
+
+1. **基本功能**
+- 接收一个包含多个时间点指标字典的列表 `metrics_history`
+- 计算每个指标across时间的平均值
+
+2. **特殊处理**
+- 如果 `metrics_history` 为空，返回空字典 `{}`
+- 如果只有一个时间点的指标，直接返回该时间点的指标
+- 对于在 `except_keys` 中的指标或 `WBValue` 类型的指标，不计算平均值，而是使用最后一个值
+
+### 代码示例
+
+```python
+# 假设有以下指标历史
+metrics_history = [
+    {'loss': 0.5, 'accuracy': 0.8, 'episode': 1},
+    {'loss': 0.3, 'accuracy': 0.9, 'episode': 2},
+    {'loss': 0.2, 'accuracy': 0.95, 'episode': 3}
+]
+
+# 计算平均值，但排除 'episode' 指标
+result = mean_metrics(metrics_history, except_keys=['episode'])
+
+# result 将类似于:
+# {
+#     'loss': 0.33,        # (0.5 + 0.3 + 0.2) / 3
+#     'accuracy': 0.88,    # (0.8 + 0.9 + 0.95) / 3
+#     'episode': 3         # 使用最后一个值
+# }
+```
+
+### 实现细节
+
+- 使用 `collections.defaultdict` 来收集每个指标的历史值
+- 使用 `compute_mean` 函数来计算平均值，该函数支持：
+  - PyTorch tensor 的平均值计算
+  - 列表或元组类型的数据转换为 tensor 后计算平均值
+'''
 def mean_metrics(metrics_history, except_keys=None):
     if len(metrics_history) == 0:
         return {}
@@ -144,6 +191,9 @@ def create_reward_transform(transform_type):
 
 
 def preprocess_atari_obs(obs, device=None):
+    '''
+    对观察进行对一化道0～1中
+    '''
     if isinstance(obs, gym.wrappers.LazyFrames):
         obs = np.array(obs)
     return torch.as_tensor(obs, device=device).float() / 255.

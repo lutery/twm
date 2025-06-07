@@ -36,23 +36,30 @@ class WorldModel(nn.Module):
         return self.dyn_model.h_dim
 
     def optimize_pretrain_obs(self, o):
+        '''
+        o: 传入环境的观察数据，数值范围是[0, 1], 形状为(batch_size, time, frame_stack, height, width, channels)  [wm_total_batch_size, 1, frame_stack, h, w, channels] 或者 [1 + prefix + wm_total_batch_size + 1, 1, frame_stack, h, w, c]
+        '''
+
         obs_model = self.obs_model
         obs_model.train()
-
+        
+        # 将观察数据进行特征提取，获取一个潜在分布
         z_dist = obs_model.encode(o)
-        z = obs_model.sample_z(z_dist, reparameterized=True)
+        # z shape is (batch_size, time, z_categoricals * z_categories)
+        z = obs_model.sample_z(z_dist, reparameterized=True) # # 这里返回的是对应的潜在分布的采样结果，z shape is (batch_size, time, z_categoricals * z_categories)
+        # 通过潜在分布进行重构,recons shape is (batch_size, time, frame_stack, height, width, channels)
         recons = obs_model.decode(z)
 
         # no consistency loss required for pretraining
-        dec_loss, dec_met = obs_model.compute_decoder_loss(recons, o)
-        ent_loss, ent_met = obs_model.compute_entropy_loss(z_dist)
+        dec_loss, dec_met = obs_model.compute_decoder_loss(recons, o) # 计算重构损失
+        ent_loss, ent_met = obs_model.compute_entropy_loss(z_dist) # 计算熵损失和指标，这里的熵应该是让提取的特征不会过于确定，保持一定的随机性，能够抓住更多的关键特征点
 
-        obs_loss = dec_loss + ent_loss
-        self.obs_optimizer.step(obs_loss)
+        obs_loss = dec_loss + ent_loss # 汇总全部损失
+        self.obs_optimizer.step(obs_loss) # 优化
 
-        metrics = utils.combine_metrics([ent_met, dec_met])
+        metrics = utils.combine_metrics([ent_met, dec_met]) # 合并指标
         metrics['obs_loss'] = obs_loss.detach()
-        return metrics
+        return metrics # 返回
 
     def optimize_pretrain_dyn(self, z, a, r, terminated, truncated, target_logits):
         assert utils.same_batch_shape([z, a, r, terminated, truncated])
@@ -90,11 +97,11 @@ class WorldModel(nn.Module):
         # observation model
         o = o[:, 1:-1]
         z_dist = obs_model.encode(o)
-        z = obs_model.sample_z(z_dist, reparameterized=True)
+        z = obs_model.sample_z(z_dist, reparameterized=True) # 这里返回的是对应的潜在分布的采样结果，z shape is (batch_size, time, z_categoricals * z_categories)
         recons = obs_model.decode(z)
 
-        dec_loss, dec_met = obs_model.compute_decoder_loss(recons, o)
-        ent_loss, ent_met = obs_model.compute_entropy_loss(z_dist)
+        dec_loss, dec_met = obs_model.compute_decoder_loss(recons, o) # 计算重构损失和指标
+        ent_loss, ent_met = obs_model.compute_entropy_loss(z_dist) # 计算熵损失和指标，这里的熵应该是让提取的特征不会过于确定，保持一定的随机性，能够抓住更多的关键特征点
 
         # dynamics model
         z = z.detach()
@@ -165,48 +172,142 @@ class ObservationModel(nn.Module):
 
     @staticmethod
     def create_z_dist(logits, temperature=1):
-        assert temperature > 0
+        assert temperature > 0 # 这里的温度是为了控制采样的平滑度，temperature越大，采样越平滑
+        # OneHotCategoricalStraightThrough
+        # 用于将观察编码为离散的潜在表示
+        # temperature 参数控制采样的"软硬程度"
+        # 通过 Straight-Through 技巧实现离散变量的可导采样
+
+        # independent 的作用
+        '''
+        reinterpreted_batch_ndims=1 表示将最后一个维度视为事件维度
+        对于形状 (batch, time, z_categoricals, z_categories) 的数据：
+        将 z_categoricals 个类别分布视为独立分布
+
+        联合概率计算:
+        自动处理多个独立分布的联合概率
+        在计算 log probability 时自动对事件维度求和
+
+        学习离散的潜在表示
+        保持端到端的可训练性
+        正确处理多个独立分布的概率计算
+        todo 调试了解
+        '''
         return D.Independent(D.OneHotCategoricalStraightThrough(logits=logits / temperature), 1)
 
     def encode(self, o):
+        '''
+        o: 形状为(batch_size, time, frame_satck, height, width, channels)  [wm_total_batch_size, 1, frame_stack, h, w, channels] 或者 [1 + prefix + wm_total_batch_size + 1, 1, frame_stack, h, w, channels]
+
+        return: 返回的分布对象
+        '''
         assert utils.check_no_grad(o)
         config = self.config
-        shape = o.shape[:2]
-        o = o.flatten(0, 1)
+        shape = o.shape[:2] # 获取batch_size, timestep
+        o = o.flatten(0, 1) # 仅展平 前两个维度，o shape is (batch_size * time, [frame_stack], height, width, channels)
 
-        if not config['env_grayscale']:
-            o = o.permute(0, 1, 4, 2, 3)
-            o = o.flatten(1, 2)
+        if not config['env_grayscale']: # 如果是彩色图，那么存在channels维度，需要将channels维度展平
+            o = o.permute(0, 1, 4, 2, 3) # o shape is (batch_size * time, [frame_stack], height, width, channels) -> (batch_size * time, [frame_stack], channels, height, width)
+            o = o.flatten(1, 2) # 展品第1个维度和第2个维度， shape is (batch_size * time, [frame_stack * channels], height, width)
 
+        # z_logits shape is (batch_size * time, z_categoricals * z_categories(z_dim))
         z_logits = self.encoder(o)
-        z_logits = z_logits.unflatten(0, shape)
-        z_logits = z_logits.unflatten(-1, (config['z_categoricals'], config['z_categories']))
-        z_dist = ObservationModel.create_z_dist(z_logits)
+        z_logits = z_logits.unflatten(0, shape) # 将展平的维度恢复为原来的维度，shape is (batch_size, time, z_categoricals * z_categories(z_dim))
+        z_logits = z_logits.unflatten(-1, (config['z_categoricals'], config['z_categories'])) # shape is (batch_size, time, z_categoricals, z_categories)
+        z_dist = ObservationModel.create_z_dist(z_logits) # 调用观察模型的create_z_dist方法，创建一个独立的OneHotCategorical分布
         return z_dist
 
     def sample_z(self, z_dist, reparameterized=False, temperature=1, idx=None, return_logits=False):
-        logits = z_dist.base_dist.logits
+        '''
+        当 reparameterized=True 时：
+        使用 rsample() 方法进行采样
+        实现可导的采样过程
+        允许梯度通过采样操作反向传播
+        当 reparameterized=False 时：
+
+        使用 sample() 方法进行采样
+        采样过程不可导
+        阻止梯度通过采样操作反向传播
+
+
+        return_logits: 是否返回 logits
+        '''
+        logits = z_dist.base_dist.logits # shape is (batch_size, time, z_categoricals, z_categories)
+        # 这里应该是为了确保参数可导性是否和 reparameterized 参数一致
         assert (not reparameterized) == utils.check_no_grad(logits)
         if temperature == 0:
+            # 这里是参数不可导的流程
             assert not reparameterized
             with torch.no_grad():
                 if idx is not None:
                     logits = logits[idx]
-                indices = torch.argmax(logits, dim=-1)
+                indices = torch.argmax(logits, dim=-1) # shape is (batch_size, time, z_categoricals)
+                # one_hot = F.one_hot(indices, num_classes=self.config['z_categories'])
+                # shape: (batch_size, time, z_categoricals, z_categories)
+                # flattened = one_hot.flatten(2, 3)
+                # shape: (batch_size, time, z_categoricals * z_categories)
                 z = F.one_hot(indices, num_classes=self.config['z_categories']).flatten(2, 3).float()
             if return_logits:
+                # 不但返回预测的最大可能预测值，还会返回原始的logits
                 return z, logits  # actually wrong logits for temperature = 0
+            # 这里是不可导的采样流程，直接返回
             return z
 
         if temperature != 1 or idx is not None:
             if idx is not None:
                 logits = logits[idx]
+            # 这里是可导的采样流程，使用温度参数进行采样，又将logits包装为预测分布的对象
             z_dist = ObservationModel.create_z_dist(logits, temperature)
             if return_logits:
+                # 获取新的归一化的logits
                 logits = z_dist.base_dist.logits  # return new normalized logits
 
+        # 这里是可导的采样流程，使用 reparameterized 参数决定是否使用 rsample() 方法进行采样
+        '''
+        `rsample()` 和 `sample()` 是 PyTorch 分布类中两种不同的采样方法，主要区别在于梯度传播：
+
+        ### `sample()`
+        - **不可导的采样**
+        - 直接从分布中采样
+        - **阻止梯度反向传播**
+        - 用于推理阶段
+
+        ```python
+        # 示例
+        dist = D.Normal(mean, std)
+        z = dist.sample()  # 梯度在此处停止
+        ```
+
+        ### `rsample()`
+        - **可重参数化的采样**
+        - 使用重参数化技巧进行采样
+        - **允许梯度反向传播**
+        - 用于训练阶段
+
+        ```python
+        # 示例
+        dist = D.Normal(mean, std)
+        z = dist.rsample()  # 梯度可以通过采样传播
+        ```
+
+        ### 在代码中的使用
+        ```python
+        # 在 sample_z 函数中
         z = z_dist.rsample() if reparameterized else z_dist.sample()
-        z = z.flatten(2, 3)
+        ```
+        - 当 `reparameterized=True` 时使用 `rsample()` 用于训练
+        - 当 `reparameterized=False` 时使用 `sample()` 用于推理
+
+        ### 重参数化技巧的工作原理
+        1. 将随机性从分布参数中分离
+        2. 使用确定性函数将标准分布样本转换为目标分布样本
+        3. 保持计算图的可导性
+
+        这种设计对于变分自编码器（VAE）等需要通过随机变量反向传播梯度的模型特别重要。
+        '''
+        z = z_dist.rsample() if reparameterized else z_dist.sample()
+        # z shape is (batch_size, time, z_categoricals, z_categories)
+        z = z.flatten(2, 3) # 将最后两个维度展平，shape is (batch_size, time, z_categoricals * z_categories)
         if return_logits:
             return z, logits
         return z
@@ -216,54 +317,106 @@ class ObservationModel(nn.Module):
         return self.sample_z(z_dist, reparameterized, temperature, idx, return_logits)
 
     def decode(self, z):
+        '''
+        z: (batch_size, time, z_categoricals * z_categories)
+        '''
         config = self.config
         shape = z.shape[:2]
-        z = z.flatten(0, 1)
-        recons = self.decoder(z)
+        z = z.flatten(0, 1) # 将前两个维度展平，shape is (batch_size * time, z_categoricals * z_categorie(z_dim)))
+        recons = self.decoder(z) # 解码潜在表示，shape is (batch_size * time, num_channels * frame_stack, height, width)
         if not config['env_grayscale']:
+            # 如果是彩色图片 shape (batch_size * time, frame_stack, num_channels, height, width)
             recons = recons.unflatten(1, (config['env_frame_stack'], 3))
+            # recons shape is (batch_size * time, frame_stack, height, width, num_channels)
             recons = recons.permute(0, 1, 3, 4, 2)
-        recons = recons.unflatten(0, shape)
+        recons = recons.unflatten(0, shape) # recons shape is (batch_size, time, frame_stack, height, width, num_channels)
         return recons
 
     def compute_decoder_loss(self, recons, o):
+        '''
+        recons: 重构观察后的数据，形状为(batch_size, time, frame_stack, height, width, channels) [wm_total_batch_size, 1, frame_stack, h, w, channels] 或者 [1 + prefix + wm_total_batch_size + 1, 1, frame_stack, h, w, channels]    
+        o: 真实的观察数据 形状为(batch_size, time, frame_stack, height, width, channels) [wm_total_batch_size, 1, frame_stack, h, w, channels] 或者 [1 + prefix + wm_total_batch_size + 1, 1, frame_stack, h, w, channels]
+        如果是灰度图，那么channels应该不存在
+        return： loss: 重构损失, metrics: 一个字典，包含重构损失和重构均方误差
+        '''
         assert utils.check_no_grad(o)
         config = self.config
         metrics = {}
-        recon_mean = recons.flatten(0, 1).permute(0, 2, 3, 1)
-        coef = config['obs_decoder_coef']
+        # recons.flatten(0, 1):  (batch_size * time, frame_stack, height, width, channels)
+        # recon_mean： .permute(0, 2, 3, 1)： (batch_size * time, height, width, frame_stack，channels) todo 验证这里的shape变化
+        recon_mean = recons.flatten(0, 1).permute(0, 2, 3, 1) 
+        coef = config['obs_decoder_coef'] # 这里的obs_decoder_coef可以为0吗？
+        # coef权重系数，用于控制重构损失在总损失中的比重
         if coef != 0:
-            if config['env_grayscale']:
+            if config['env_grayscale']: 
+                # 灰度图像的处理
+                # o shape is (batch_size * time, height, width, frame_stack)
                 o = o.flatten(0, 1).permute(0, 2, 3, 1)
             else:
+                # 彩色图像的处理
+                # o.flatten(0, 1): (batch_size * time, frame_stack， height, width， channels)
+                # o = o.permute(0, 1, 4, 2, 3) # 将channels维度移动到最后，o shape is (batch_size * time, height, width, frame_stack， channels)
+                # o = o.flatten(1, 2) # 展平frame_stack和channels维度，o shape is (batch_size * time, height, width, frame_stack * channels)
                 o = o.flatten(0, 1).permute(0, 2, 3, 1, 4).flatten(-2, -1)
+            # D.Independent： base_distribution: 基础分布（如 Normal、Categorical 等）；reinterpreted_batch_ndims: 要重新解释为事件维度的批次维度数量，这里是将最后一个维度视为采样分数维度
+            # D.Normal(loc, scale)： loc: 均值（μ），决定分布的中心位置；scale: 标准差（σ），决定分布的分散程；
             recon_dist = D.Independent(D.Normal(recon_mean, torch.ones_like(recon_mean)), 3)
+            # 在计算重构分布和原始观察之间的对数似然（log-likelihood），越接近真实观察值，对数概率越大，负号表示我们要最小化负对数似然
             loss = -coef * recon_dist.log_prob(o).mean()
-            metrics['dec_loss'] = loss.detach()
+            metrics['dec_loss'] = loss.detach() # 记录重构损失
         else:
+            # 如果重构损失系数为0，则不计算重构损失 为啥？
             loss = torch.zeros(1, device=recons.device, requires_grad=False)
+        # 计算重构均方误差
         metrics['recon_mae'] = torch.abs(o - recon_mean.detach()).mean()
         return loss, metrics
 
     def compute_entropy_loss(self, z_dist):
+        '''
+        z_dist: 观察编码后的潜在分布对象，采样的形状为(batch_size, time, z_categoricals, z_categories)
+        '''
         config = self.config
         metrics = {}
 
-        entropy = z_dist.entropy().mean()
-        max_entropy = config['z_categoricals'] * math.log(config['z_categories'])
-        normalized_entropy = entropy / max_entropy
-        metrics['z_ent'] = entropy.detach()
+        entropy = z_dist.entropy().mean() # 计算潜在分布的熵
+        '''
+        单个类别分布的最大熵:
+        对于一个有 k 个类别的离散分布
+        当各类别概率相等时（均匀分布）熵最大
+        此时每个类别概率为 1/k
+        最大熵值为 log(k)
+        独立分布的熵:
+        z_categoricals 个独立的类别分布
+        每个分布有 z_categories 个类别
+        独立分布的总熵是各个分布熵的和
+
+        max_entropy = n * log(k)
+        其中：
+        - n = z_categoricals (独立分布的数量)
+        - k = z_categories (每个分布的类别数)
+
+
+        '''
+        max_entropy = config['z_categoricals'] * math.log(config['z_categories']) # 最大熵
+        normalized_entropy = entropy / max_entropy # 归一化熵
+        metrics['z_ent'] = entropy.detach() # 记录熵值和归一化熵值
         metrics['z_norm_ent'] = normalized_entropy.detach()
 
-        coef = config['obs_entropy_coef']
+        coef = config['obs_entropy_coef'] # 获取熵损失权重
         if coef != 0:
+            # 归一化熵损失阈值
             if config['obs_entropy_threshold'] < 1:
+                # 如果有阈值且为1，则阈值生效，当normalized_entropy小于config['obs_entropy_threshold']，则产生损失
+                # 当 normalized_entropy 大于等于 config['obs_entropy_threshold'] 时，则损失为0，因为relu
+                # 过滤掉熵过大的部分，保留熵小的部分，这样可以避免本身过大的熵继续增加，而让过小的熵能够增加从而保持稳定的不确定性
                 # hinge loss, inspired by https://openreview.net/pdf?id=HkCjNI5ex
                 loss = coef * torch.relu(config['obs_entropy_threshold'] - normalized_entropy)
             else:
+                # 得到熵的负值作为损失，求最小，则求最大化熵
                 loss = -coef * normalized_entropy
             metrics['z_entropy_loss'] = loss.detach()
         else:
+            # 同样如果权重为0，则熵损失为0
             loss = torch.zeros(1, device=z_dist.base_dist.logits.device, requires_grad=False)
 
         return loss, metrics

@@ -41,6 +41,7 @@ class Trainer:
         self.agent = Agent(config, num_actions).to(config['model_device'])
 
         # metrics that won't be summarized, the last value will be used instead
+        # 这些指标在训练过程中不会被汇总，而是直接使用最后一个值
         except_keys = ['buffer/size', 'buffer/total_reward', 'buffer/num_episodes']
         # 这里应该是设置了一个指标汇总器，用于收集和汇总训练过程中的指标
         self.summarizer = utils.MetricsSummarizer(except_keys=except_keys)
@@ -129,23 +130,26 @@ class Trainer:
         config = self.config
         replay_buffer = self.replay_buffer
 
-        log_every = 20
+        log_every = 20 # 统计指标的间隔
         self.last_eval = 0
         self.total_eval_time = 0
 
         # prefill the buffer with randomly collected data
         random_policy = lambda index: replay_buffer.sample_random_action()
+        # 这里使用的是随机策略来填充缓冲区
         for _ in range(config['buffer_prefill'] - 1):
             replay_buffer.step(random_policy)
             metrics = {}
+            # 更新打印缓冲区的指标
             utils.update_metrics(metrics, replay_buffer.metrics(), prefix='buffer/')
             self.summarizer.append(metrics)
             if replay_buffer.size % log_every == 0:
                 wandb.log(self.summarizer.summarize())
 
-        # final prefill step
+        # final prefill step 又执行了一步
         replay_buffer.step(random_policy)
         metrics = {}
+        # 更新打印缓冲区的指标
         utils.update_metrics(metrics, replay_buffer.metrics(), prefix='buffer/')
 
         # pretrain on the prefilled data
@@ -225,16 +229,20 @@ class Trainer:
         replay_buffer = self.replay_buffer
 
         # pretrain observation model
+        # 这里是计算总共要采样的样本数量
         wm_total_batch_size = config['wm_batch_size'] * config['wm_sequence_length']
+        # 这里是用于控制器预训练的计算量，投入多少个样本
         budget = config['pretrain_budget'] * config['pretrain_obs_p']
+        # 这里的预训练主要是用于预训练观察模型
         while budget > 0:
+            # 随机打乱replay_buffer的索引 可能输出：tensor([3, 1, 4, 2, 0])
             indices = torch.randperm(replay_buffer.size, device=replay_buffer.device)
             while len(indices) > 0 and budget > 0:
-                idx = indices[:wm_total_batch_size]
-                indices = indices[wm_total_batch_size:]
-                o = replay_buffer.get_obs(idx, device=device)
-                _ = wm.optimize_pretrain_obs(o.unsqueeze(1))
-                budget -= idx.numel()
+                idx = indices[:wm_total_batch_size] # 获取前wm_total_batch_size个索引，shape is [wm_total_batch_size]
+                indices = indices[wm_total_batch_size:] # 删除前wm_total_batch_size个索引
+                o = replay_buffer.get_obs(idx, device=device) # 根据索引获取观察数据 shape [wm_total_batch_size, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, frame_stack, h, w, c]
+                _ = wm.optimize_pretrain_obs(o.unsqueeze(1)) # o shape is [wm_total_batch_size, 1, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, 1, frame_stack, h, w, c] 进行预训练
+                budget -= idx.numel() # 计算已经使用的观察数据量，减去budget，用于更新还剩多少个样本用于训练
 
         # encode all observations once, since the encoder does not change anymore
         indices = torch.arange(replay_buffer.size, dtype=torch.long, device=replay_buffer.device)

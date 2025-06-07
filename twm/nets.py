@@ -221,12 +221,24 @@ class CNN(_MultilayerModule):
                  param=None, norm=None, dropout_p=0, bias=True, padding_mode='zeros', in_shape=None,
                  pre_activation=False, post_activation=False,
                  weight_initializer='kaiming_uniform', bias_initializer='zeros', final_bias_init=None):
+        '''
+        in_dim: num_channels，输入的通道数，等于帧堆叠数和图像的通道数乘积
+        hidden_dims: [h, h * 2, h * 4]
+        out_dim: h * 8
+        kernel_sizes: [4, 4, 4, 4]
+        strides: [2, 2, 2, 2]
+        paddings: [0, 0, 0, 0]
+        nonlinearity: activation
+        norm=norm
+        post_activation=True
+        '''
         assert len(kernel_sizes) == len(hidden_dims) + 1
         assert len(strides) == len(kernel_sizes) and len(paddings) == len(kernel_sizes)
+        # 拼接输入的通道数、隐藏层的通道数和输出的通道数
         dims = (in_dim,) + tuple(hidden_dims) + (out_dim,)
         super().__init__('conv', 3, in_dim, len(dims) - 1, nonlinearity, param, norm, dropout_p,
                          pre_activation, post_activation, weight_initializer, bias_initializer, final_bias_init)
-        if self.unsqueeze:
+        if self.unsqueeze: # 如果输入的通道数是0，那么就要讲第一个维度进行扩展，默认为1个维度
             dims = (1,) + dims[1:]
 
         def to_pair(x):
@@ -239,33 +251,41 @@ class CNN(_MultilayerModule):
             kernel_size, padding, stride = [to_pair(x) for x in (kernel_size, stride, padding)]
             return tuple((shape[j] + 2 * padding[j] - kernel_size[j]) / stride[j] + 1 for j in [0, 1])
 
+        # 这里应该是获取归一化层添加到模型中
         if pre_activation and self.has_norm:
             norm_layer = get_norm_2d(norm, in_dim, in_shape[0], in_shape[1])
             self.add_module('norm0', norm_layer)
 
         shape = in_shape
+        # 增加卷积层
         for i in range(self.num_layers - 1):
             conv_layer = nn.Conv2d(dims[i], dims[i + 1], kernel_sizes[i], strides[i], paddings[i],
                                    bias=bias, padding_mode=padding_mode)
             self.add_module(f'conv{i + 1}', conv_layer)
             if self.has_norm:
                 if shape is not None:
+                    # 计算卷积层输出的形状
                     shape = calc_out_shape(shape, kernel_sizes[i], strides[i], paddings[i])
+                # 获取归一化层,输入的shape时针对LayerNorm使用
                 norm_layer = get_norm_2d(norm, dims[i + 1], shape[0], shape[1])
                 self.add_module(f'norm{i + 1}', norm_layer)
 
+        # 增加最后一层卷积层
         conv_layer = nn.Conv2d(dims[-2], dims[-1], kernel_sizes[-1], strides[-1], paddings[-1],
                                bias=bias, padding_mode=padding_mode)
         self.add_module(f'conv{self.num_layers}', conv_layer)
 
+        # 增加最后一层归一化层
         if post_activation and self.has_norm:
             shape = calc_out_shape(shape, kernel_sizes[-1], strides[-1], paddings[-1])
             norm_layer = get_norm_2d(norm, dims[-1], shape[0], shape[1])
             self.add_module(f'norm{self.num_layers}', norm_layer)
 
+        # 如果有归一化层则添加dropout层，但是理论上不应该要和norm分开使用吗？
         if self.has_dropout:
             self.dropout = nn.Dropout2d(dropout_p)
 
+        # 重置参数
         self.reset_parameters()
 
 

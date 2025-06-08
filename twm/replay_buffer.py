@@ -48,7 +48,7 @@ class ReplayBuffer:
     def _get(self, array, idx, device=None, prefix=0, return_next=False, repeat_fill_value=None, allow_last=False):
         '''
         array: 需要获取的数组
-        idx: 索引，可以是整数、范围、元组、列表或numpy数组，可能为[wm_total_batch_size]
+        idx: 索引，可以是整数、范围、元组、列表或numpy数组，可能为[wm_total_batch_size],可能为【1, replay_buffer.size】
         device: 设备，如果不为None，则将结果转换到指定设备
 
         return: 返回指定idx索引的数据，并且根据prefix和return_next参数进行前面N个数据的获取和后面一个数据的获取，如果索引越界，将越界的数据填充为repeat_fill_value
@@ -142,12 +142,14 @@ class ReplayBuffer:
         if squeeze_batch:
             x = x.squeeze(0)
         # x shape [wm_total_batch_size, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, frame_stack, h, w, c]
+        # 如果传入的idx本身就是二维，那么x shape 可能 is [1, 1 + prefix + wm_total_batch_size, frame_stack, h, w, c]
         if device is not None and x.device != device:
             return x.to(device=device)
         return x
 
     def get_obs(self, idx, device=None, prefix=0, return_next=False):
         # return obs : [wm_total_batch_size, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, frame_stack, h, w, c]
+        # 或 return obs: [1, 1 + prefix + replay.size, frame_stack, h, w, c]
         obs = self._get(self.obs, idx, device, prefix, return_next=return_next, allow_last=True)
         return utils.preprocess_atari_obs(obs, device)
 
@@ -253,13 +255,22 @@ class ReplayBuffer:
         return idx
 
     def generate_uniform_indices(self, batch_size, sequence_length, extra=0):
-        start_offset = random.randint(0, sequence_length - 1)
+        '''
+        extra: 2 for context + next
+
+        return: 生成一个迭代器，每次返回一个batch_size个序列的起始索引，形状为(batch_size, sequence_length + extra)
+        这里的sequence_length是指每个序列的长度，extra是指额外的上下文长度，比如2表示上下文和下一个状态
+        这里的batch_size是指每次生成的序列的数量
+        这里的start_offset是一个随机的偏移量，表示从哪个位置开始生成序列
+        这里的start_idx是一个范围为[start_offset, size - sequence_length]的索引，并且其步长为sequence_length，这里应该是获取了多段squences的起始索引
+        '''
+        start_offset = random.randint(0, sequence_length - 1) # 获取一个随机的偏移量 n（小于sequence_length）
         start_idx = torch.arange(start_offset, self.size - sequence_length, sequence_length,
-                                 dtype=torch.long, device=self.device)
-        start_idx = start_idx[torch.randperm(start_idx.shape[0], device=self.device)]
+                                 dtype=torch.long, device=self.device) # 获取了一个范围为[start_offset, size - sequence_length]的索引，并且其步长为sequence_length，这里应该是获取了多段squences的起始索引， shape ((self.size - sequence_length - start_offset) // sequence_length)
+        start_idx = start_idx[torch.randperm(start_idx.shape[0], device=self.device)] # 打乱这些索引
         while len(start_idx) > 0:
-            idx = start_idx[:batch_size]
-            idx = idx.unsqueeze(-1) + torch.arange(sequence_length + extra, device=self.device)
+            idx = start_idx[:batch_size] # 获取batch_size个起始序列索引， shape is (batch_size,)
+            idx = idx.unsqueeze(-1) + torch.arange(sequence_length + extra, device=self.device) # shape is (batch_size, sequence_length + extra)
             yield idx
             start_idx = start_idx[batch_size:]
 

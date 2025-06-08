@@ -62,13 +62,18 @@ class WorldModel(nn.Module):
         return metrics # 返回
 
     def optimize_pretrain_dyn(self, z, a, r, terminated, truncated, target_logits):
-        assert utils.same_batch_shape([z, a, r, terminated, truncated])
+        '''
+        z shape is （1，sequence_length + extra - 1， z_categoricals * z_categories）
+        target_logits: （1，-2 + sequence_length + extra， z_categoricals * z_categories）
+        a, r, terminated, truncated, shape is (1, sequence_length + extra - 2)
+        '''
+        assert utils.same_batch_shape([z, a, r, terminated, truncated]) 
         assert utils.same_batch_shape_time_offset(z, target_logits, 1)
         dyn_model = self.dyn_model
         dyn_model.train()
 
         d = torch.logical_or(terminated, truncated)
-        g = self.to_discounts(terminated)
+        g = self.to_discounts(terminated) # 获取一个折扣矩阵，并且如果terminated对应的位置为true，表示结束，折扣应为0
         target_weights = (~d[:, 1:]).float()
         tgt_length = target_logits.shape[1]
 
@@ -133,8 +138,8 @@ class WorldModel(nn.Module):
     def to_discounts(self, mask):
         assert utils.check_no_grad(mask)
         discount_factor = self.config['env_discount_factor']
-        g = torch.full(mask.shape, discount_factor, device=mask.device)
-        g = g * (~mask).float()
+        g = torch.full(mask.shape, discount_factor, device=mask.device) # 获取折扣因子，创建和mask相同shape的折扣矩阵
+        g = g * (~mask).float() # 如果mask对应的位置为True（表示结束），那么对应位置去反为false，float后为0，给折扣矩阵对应位置的折扣设置为0
         return g
 
 
@@ -240,7 +245,7 @@ class ObservationModel(nn.Module):
             assert not reparameterized
             with torch.no_grad():
                 if idx is not None:
-                    logits = logits[idx]
+                    logits = logits[idx] # 这里的idx需要保证小于 logits 的第一个维度大小 所以这里之后 logits shape (idx batch_size, time, z_categoricals, z_categories)
                 indices = torch.argmax(logits, dim=-1) # shape is (batch_size, time, z_categoricals)
                 # one_hot = F.one_hot(indices, num_classes=self.config['z_categories'])
                 # shape: (batch_size, time, z_categoricals, z_categories)
@@ -255,7 +260,7 @@ class ObservationModel(nn.Module):
 
         if temperature != 1 or idx is not None:
             if idx is not None:
-                logits = logits[idx]
+                logits = logits[idx] # 这里的idx需要保证小于 logits 的第一个维度大小 所以这里之后 logits shape (idx batch_size, time, z_categoricals, z_categories)
             # 这里是可导的采样流程，使用温度参数进行采样，又将logits包装为预测分布的对象
             z_dist = ObservationModel.create_z_dist(logits, temperature)
             if return_logits:

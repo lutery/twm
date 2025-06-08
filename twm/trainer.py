@@ -234,33 +234,43 @@ class Trainer:
         # 这里是用于控制器预训练的计算量，投入多少个样本
         budget = config['pretrain_budget'] * config['pretrain_obs_p']
         # 这里的预训练主要是用于预训练观察模型
+        # 这里训练的数据是不连续的
         while budget > 0:
             # 随机打乱replay_buffer的索引 可能输出：tensor([3, 1, 4, 2, 0])
             indices = torch.randperm(replay_buffer.size, device=replay_buffer.device)
             while len(indices) > 0 and budget > 0:
                 idx = indices[:wm_total_batch_size] # 获取前wm_total_batch_size个索引，shape is [wm_total_batch_size]
                 indices = indices[wm_total_batch_size:] # 删除前wm_total_batch_size个索引
-                o = replay_buffer.get_obs(idx, device=device) # 根据索引获取观察数据 shape [wm_total_batch_size, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, frame_stack, h, w, c]
-                _ = wm.optimize_pretrain_obs(o.unsqueeze(1)) # o shape is [wm_total_batch_size, 1, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, 1, frame_stack, h, w, c] 进行预训练
+                o = replay_buffer.get_obs(idx, device=device) # 根据索引获取观察数据 shape [wm_total_batch_size, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size, frame_stack, h, w, c]
+                _ = wm.optimize_pretrain_obs(o.unsqueeze(1)) # o shape is [wm_total_batch_size, 1, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size, 1, frame_stack, h, w, c] 进行预训练
                 budget -= idx.numel() # 计算已经使用的观察数据量，减去budget，用于更新还剩多少个样本用于训练
 
         # encode all observations once, since the encoder does not change anymore
+        # 创建一个索引张量，范围从0到replay_buffer.size-1 shape is [replay_buffer.size]
         indices = torch.arange(replay_buffer.size, dtype=torch.long, device=replay_buffer.device)
+        # 根据索引获取观察数据，prefix=1表示使用前缀长度为1的观察数据
+        # indices.unsqueeze(0): shape is [1, replay_buffer.size]
+        # 这里的prefix=1表示使用前缀长度为1的观察数据，返回的o shape is [1, 1 + 1 + replay_buffer.size + 1, frame_stack, h, w, c]
         o = replay_buffer.get_obs(indices.unsqueeze(0), prefix=1, device=device, return_next=True)  # 1 for context
-        o = o.squeeze(0).unsqueeze(1)
+        o = o.squeeze(0).unsqueeze(1) # shape is [1 + 1 + replay_buffer.size + 1, 1, frame_stack, h, w, c]，这里的增加的第二个维度就是时间time的维度，1步
         with torch.no_grad():
-            z_dist = obs_model.eval().encode(o)
+            z_dist = obs_model.eval().encode(o) # 获取提取出来的z分布，其采样分布 shape is [1 + 1 + replay_buffer.size + 1, 1(time), z_categoricals, z_categories]
 
         # pretrain dynamics model
+        # 预训练动态模型
         budget = config['pretrain_budget'] * config['pretrain_dyn_p']
         while budget > 0:
             for idx in replay_buffer.generate_uniform_indices(
                     config['wm_batch_size'], config['wm_sequence_length'], extra=2):  # 2 for context + next
-                z, logits = obs_model.sample_z(z_dist, idx=idx.flatten(), return_logits=True)
+                # idx表示用于训练的起始索引位置 shape 应该是 （1, sequence_length + extra)
+                z, logits = obs_model.sample_z(z_dist, idx=idx.flatten(), return_logits=True) # 获取采样后的 z和logits shape (batch_size（sequence_length + extra）, 1(time), z_categoricals * z_categories)
+                # x.squeeze(1): (batch_size, z_categoricals * z_categories)
+                # x.squeeze(1).unflatten(0, idx.shape)：（1，sequence_length + extra， z_categoricals * z_categories）= z和logits
                 z, logits = [x.squeeze(1).unflatten(0, idx.shape) for x in (z, logits)]
-                z = z[:, :-1]
-                target_logits = logits[:, 2:]
-                idx = idx[:, :-2]
+                z = z[:, :-1] # z shape is （1，sequence_length + extra - 1， z_categoricals * z_categories）
+                target_logits = logits[:, 2:] # target_logits: （1，-2 + sequence_length + extra， z_categoricals * z_categories）
+                idx = idx[:, :-2] # idx shape is (1, sequence_length + extra - 2)
+                # todo 跟进下这边获取的shape具体流程
                 _, a, r, terminated, truncated, _ = replay_buffer.get_data(idx, device=device, prefix=1)
                 _ = wm.optimize_pretrain_dyn(z, a, r, terminated, truncated, target_logits)
                 budget -= idx.numel()

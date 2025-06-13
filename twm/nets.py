@@ -534,10 +534,26 @@ class PredictionNet(nn.Module):
 
     def __init__(self, modality_order, num_current, embeds, out_heads, embed_dim, activation, norm, dropout_p,
                  feedforward_dim, head_dim, num_heads, num_layers, memory_length, max_length):
+        '''
+        modality_order: ['z', 'a', 'r'(存在config: dyn_input_rewards则有), 'g'(存在dyn_input_discounts则有)]
+        num_current: 2
+        embeds: {'z': {'in_dim': z_dim, 'categorical': False}, 'a': {'in_dim': num_actions, 'categorical': True}, 'r'(config: dyn_input_rewards): {'in_dim': 0, 'categorical': False}, 'g'(dyn_input_discounts): {'in_dim': 0, 'categorical': False}}
+        out_heads: {'z': {'hidden_dims': config['dyn_z_dims'], 'out_dim': z_dim}, 'r': {'hidden_dims': config['dyn_reward_dims'], 'out_dim': 1, 'final_bias_init': 0.0}, 'g': {'hidden_dims': config['dyn_discount_dims'], 'out_dim': 1, 'final_bias_init': config['env_discount_factor']}}
+        embed_dim: config['dyn_embed_dim']
+        activation: config['dyn_act']
+        norm: config['dyn_norm']
+        dropout_p: config['dyn_dropout']
+        feedforward_dim: config['dyn_feedforward_dim']
+        head_dim: config['dyn_head_dim']
+        num_heads: config['dyn_num_heads']
+        num_layers: config['dyn_num_layers']
+        memory_length: config['wm_memory_length']
+        max_length: 1 + config['wm_sequence_length']  # 1 for context
+        '''
         super().__init__()
         self.embed_dim = embed_dim
         self.memory_length = memory_length
-        self.modality_order = tuple(modality_order)
+        self.modality_order = tuple(modality_order) # 将list转换为元组
         self.num_current = num_current
 
         # embed['in_dim']：观察的特征提取后的维度
@@ -618,7 +634,20 @@ class PredictionNet(nn.Module):
         return src_mask
 
     def forward(self, inputs, tgt_length, stop_mask, heads=None, mems=None, return_attention=False):
-        modality_order = self.modality_order
+                '''
+        1: inputs: {
+            'z': z, shape is (1, sequence_length + extra - 1, z_categoricals * z_categories)
+            'a': a, shape is (1, sequence_length + extra - 2)
+            'r': r, shape is (1, sequence_length + extra - 3)
+            'g': g shape is (1, sequence_length + extra - 3)
+        }
+        2: tgt_length: 目标长度，sequence_length + extra - 2 或者 sequence_length + extra - 1
+        stop_mask: d shape is (1, sequence_length + extra - 3)
+        heads: 预测的头部，默认为 ('z', 'r', 'g')
+        mems: 记忆，默认为 None
+        return_attention: 是否返回注意力，默认为 False
+        '''
+        modality_order = self.modality_order 
         num_modalities = len(modality_order)
         num_current = self.num_current
 

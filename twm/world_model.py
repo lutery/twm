@@ -73,9 +73,13 @@ class WorldModel(nn.Module):
         dyn_model.train()
 
         d = torch.logical_or(terminated, truncated)
+        # d shape is (1, sequence_length + extra - 2)
         g = self.to_discounts(terminated) # 获取一个折扣矩阵，并且如果terminated对应的位置为true，表示结束，折扣应为0
+        # g shape is (1, sequence_length + extra - 2)
         target_weights = (~d[:, 1:]).float()
+        # target_weights shape is (1, -1 + sequence_length + extra - 2)
         tgt_length = target_logits.shape[1]
+        # tgt_length is sequence_length + extra - 2
 
         preds, h, mems = dyn_model.predict(z, a, r[:, :-1], g[:, :-1], d[:, :-1], tgt_length, compute_consistency=True)
         dyn_loss, metrics = dyn_model.compute_dynamics_loss(
@@ -491,11 +495,24 @@ class DynamicsModel(nn.Module):
 
     def predict(self, z, a, r, g, d, tgt_length, heads=None, mems=None, return_attention=False,
                 compute_consistency=False):
+        '''
+        z shape is (1, sequence_length + extra - 1, z_categoricals * z_categories)
+        a shape is (1, sequence_length + extra - 2)
+        r[:, :-1] shape is (1, sequence_length + extra - 3)
+        g[:, :-1] shape is (1, sequence_length + extra - 3)
+        d[:, :-1] shape is (1, sequence_length + extra - 3)
+        tgt_length is sequence_length + extra - 2
+        compute_consistency is True 参数在 TWM 世界模型中用于控制是否计算一致性损失，这是一个重要的训练机制
+        heads=None
+        mems=None
+        return_attention=False
+        '''
         assert utils.check_no_grad(z, a, r, g, d)
         assert mems is None or utils.check_no_grad(*mems)
         config = self.config
 
         if compute_consistency:
+            # todo 确认这里加1后，对后续的影响是什么？
             tgt_length += 1  # add 1 timestep for context
 
         inputs = {'z': z, 'a': a, 'r': r, 'g': g}

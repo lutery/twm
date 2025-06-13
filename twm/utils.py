@@ -153,6 +153,9 @@ def same_batch_shape_time_offset(a, b, offset):
 
 
 def check_no_grad(*tensors):
+    '''
+    确保所有张量都不需要梯度。
+    '''
     return all((t is None or not t.requires_grad) for t in tensors)
 
 

@@ -496,7 +496,7 @@ class DynamicsModel(nn.Module):
         a  shape is (1, sequence_length + extra - 2)
         r shape is (1, sequence_length + extra - 3)
         g shape is (batch_size(1), sequence_length + extra - 3) 是根据终止状态计算的折扣矩阵
-        tgt_length: -2 + sequence_length + extra
+        tgt_length: -2 + sequence_length + extra，是序列长度
         d shape is (1, sequence_length + extra - 2 - 1) 是一个结束标志，表示当前状态是否是终止状态
         compute_consistency is True 参数在 TWM 世界模型中用于控制是否计算一致性损失，这是一个重要的训练机制
         heads=None

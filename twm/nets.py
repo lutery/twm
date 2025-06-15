@@ -674,34 +674,62 @@ class PredictionNet(nn.Module):
 
         def cat_modalities(xs):
             '''
-            传入的xs时一个四维变量
+            传入的xs时一个四维变量，比如传入的是一个z\a\r\g的列表，所以这里就是将z\a\r\g的特征在序列维度上进行拼接
             '''
             batch_size, seq_len, dim = xs[0].shape
             # torch.cat(xs, dim=2)是将所有的xs在seq序列维度上进行拼接
             return torch.cat(xs, dim=2).reshape(batch_size, seq_len * len(xs), dim)
 
-        if mems is None: # todo 后续补充
+        if mems is None: 
+            # # modality_order[0] 表示 z 
+            # # 获取 历史序列长度。这里应该是将序列中除了最后一个，其余的当作历史序列
             history_length = embeds[modality_order[0]].shape[1] - 1
             if num_modalities == num_current:
                 inputs = cat_modalities([embeds[name] for name in modality_order])
             else:
+                # 将所有序列中的历史信息和当前信息进行拼接
                 history = cat_modalities([embeds[name][:, :history_length] for name in modality_order])
                 current = cat_modalities([embeds[name][:, history_length:] for name in modality_order[:num_current]])
+                # 再将cat后的历史信息和当前信息进行拼接
                 inputs = torch.cat([history, current], dim=1)
+            # tgt_length 是单条序列的长度 - 2 todo 为什么tgt_length是这么长
             tgt_length = (tgt_length - 1) * num_modalities + num_current
+            # history_length 历史序列长度
             src_length = history_length * num_modalities + num_current
+            # 而以上* num_modalities + num_current就是为了计算拼接后的长度
             assert inputs.shape[1] == src_length
             src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask)
         else:
+            # todo 后续补充
             # modality_order[0] 表示 z
             # 获取 序列长度
             sequence_length = embeds[modality_order[0]].shape[1]
             # switch order so that 'currents' are last
-            # (modality_order[num_current:] + modality_order[:num_current])：仅获取0～2 * num_current的部分
+            '''
+            modality_order[num_current:] 得到 ('r', 'g')
+            modality_order[:num_current] 得到 ('z', 'a')
+            合并后变成 ('r', 'g', 'z', 'a')
+
+            在 Transformer 架构中，这种重排序是为了：
+
+            调整注意力机制：
+
+            将历史信息（如奖励、折扣）放在序列的前部
+            将当前需要预测的信息（如状态、动作）放在序列的后部
+            序列处理顺序：
+
+            在调用 cat_modalities 时，这种排序确保了编码器先处理历史相关模态，再处理当前模态
+            这种处理顺序对于预测任务尤为重要
+            内存处理：
+
+            在使用记忆机制时，这种排序与内存的存储和检索模式一致
+            这是典型的 Transformer XL 或类似架构中的一种优化技术，有助于模型更有效地处理时序依赖关系。
+            '''
+            # 将embeds中的模态按照modality_order的顺序进行拼接
             inputs = cat_modalities(
                 [embeds[name] for name in (modality_order[num_current:] + modality_order[:num_current])])
-            tgt_length = tgt_length * num_modalities
-            mem_length = mems[0].shape[0]
+            tgt_length = tgt_length * num_modalities # todo 这里是将目标长度乘以模态数量
+            mem_length = mems[0].shape[0] 
             src_length = mem_length + sequence_length * num_modalities
             src_mask = self._get_mask(src_length, tgt_length, inputs.device, stop_mask)
 

@@ -72,14 +72,10 @@ class WorldModel(nn.Module):
         dyn_model = self.dyn_model
         dyn_model.train()
 
-        d = torch.logical_or(terminated, truncated)
-        # d shape is (1, sequence_length + extra - 2)
-        g = self.to_discounts(terminated) # 获取一个折扣矩阵，并且如果terminated对应的位置为true，表示结束，折扣应为0
-        # g shape is (1, sequence_length + extra - 2)
-        target_weights = (~d[:, 1:]).float()
-        # target_weights shape is (1, -1 + sequence_length + extra - 2)
-        tgt_length = target_logits.shape[1]
-        # tgt_length is sequence_length + extra - 2
+        d = torch.logical_or(terminated, truncated) # d shape is (1, sequence_length + extra - 2)
+        g = self.to_discounts(terminated) # 获取一个折扣矩阵，并且如果terminated对应的位置为true，表示结束，折扣应为0 g shape is (batch_size(1), sequence_length + extra - 2)
+        target_weights = (~d[:, 1:]).float() # target_weights shape is (1, -1 + sequence_length + extra - 2)，表示非结束状态的权重
+        tgt_length = target_logits.shape[1] # 获取序列长度  tgt_length is sequence_length + extra - 2
 
         preds, h, mems = dyn_model.predict(z, a, r[:, :-1], g[:, :-1], d[:, :-1], tgt_length, compute_consistency=True)
         dyn_loss, metrics = dyn_model.compute_dynamics_loss(
@@ -496,12 +492,12 @@ class DynamicsModel(nn.Module):
     def predict(self, z, a, r, g, d, tgt_length, heads=None, mems=None, return_attention=False,
                 compute_consistency=False):
         '''
-        z shape is (1, sequence_length + extra - 1, z_categoricals * z_categories)
-        a shape is (1, sequence_length + extra - 2)
-        r[:, :-1] shape is (1, sequence_length + extra - 3)
-        g[:, :-1] shape is (1, sequence_length + extra - 3)
-        d[:, :-1] shape is (1, sequence_length + extra - 3)
-        tgt_length is sequence_length + extra - 2
+        z shape is （1，sequence_length + extra - 1， z_categoricals * z_categories） 是环境特征提取后，采样的环境潜在状态
+        a  shape is (1, sequence_length + extra - 2)
+        r shape is (1, sequence_length + extra - 3)
+        g shape is (batch_size(1), sequence_length + extra - 3) 是根据终止状态计算的折扣矩阵
+        tgt_length: -2 + sequence_length + extra
+        d shape is (1, sequence_length + extra - 2 - 1) 是一个结束标志，表示当前状态是否是终止状态
         compute_consistency is True 参数在 TWM 世界模型中用于控制是否计算一致性损失，这是一个重要的训练机制
         heads=None
         mems=None

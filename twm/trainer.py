@@ -262,7 +262,7 @@ class Trainer:
         while budget > 0:
             for idx in replay_buffer.generate_uniform_indices(
                     config['wm_batch_size'], config['wm_sequence_length'], extra=2):  # 2 for context + next
-                # idx表示用于训练的起始索引位置 shape 应该是 （1, sequence_length + extra)
+                # idx表示用于训练的起始索引位置 shape 应该是 （1, sequence_length + extra)，z是环境分布采样的数据，logits是环境特征提取后的分布
                 z, logits = obs_model.sample_z(z_dist, idx=idx.flatten(), return_logits=True) # 获取采样后的 z和logits shape (batch_size（sequence_length + extra）, 1(time), z_categoricals * z_categories)
                 # x.squeeze(1): (batch_size, z_categoricals * z_categories)
                 # x.squeeze(1).unflatten(0, idx.shape)：（1，sequence_length + extra， z_categoricals * z_categories）= z和logits

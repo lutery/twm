@@ -558,7 +558,14 @@ class PredictionNet(nn.Module):
 
         # embed['in_dim']：观察的特征提取后的维度
         # embed_dim： 这个潜入维度的作用是啥？todo
-        # 根据之前的设置，先使用MLP进行特征的进一步提取，然后在使用nn.Embedding进行embedding
+        # 根据embed的类型来选择是使用nn.Embedding还是MLP，可知除了动作之外，其余的都是MLP
+        # todo 那为什么动作需要使用nn.Embedding呢？因为动作是离散的，所以需要使用nn.Embedding来进行嵌入
+        # semf.embeds = {
+        #   'z': nn.Embedding(z_dim, embed_dim),
+        #   'a': nn.Embedding(num_actions, embed_dim),
+        #   'r': MLP(0, [], embed_dim, activation, norm=norm, dropout_p=dropout_p, post_activation=True), 虽然传入的是0，但是根据代码，会自动将0转换为1个维度
+        #   'g': MLP(0, [], embed_dim, activation, norm=norm, dropout_p=dropout_p, post_activation=True)，虽然传入的是0，但是根据代码，会自动将0转换为1个维度
+        #}
         self.embeds = nn.ModuleDict({
             name: nn.Embedding(embed['in_dim'], embed_dim) if embed.get('categorical', False) else
             MLP(embed['in_dim'], [], embed_dim, activation, norm=norm, dropout_p=dropout_p, post_activation=True)
@@ -649,19 +656,31 @@ class PredictionNet(nn.Module):
         '''
         modality_order = self.modality_order 
         num_modalities = len(modality_order)
-        num_current = self.num_current
+        num_current = self.num_current # 这current代表说输入的inputs确认一定存在的数量有多少个，其余的都是可选存在
 
-        assert utils.same_batch_shape([inputs[name] for name in modality_order[:num_current]])
+        # 这里的是为了确保输入的batch shape是相同的
+        assert utils.same_batch_shape([inputs[name] for name in modality_order[:num_current]]) 
         if num_modalities > num_current:
             assert utils.same_batch_shape([inputs[name] for name in modality_order[num_current:]])
 
+        # 根据不同的输入类型来获取不同的特征（z：环境采样特征，a：动作特征，r：奖励特征，g：折扣因子特征）
+        # embeds shape is {
+        #  'z': (1, sequence_length + extra - 1, embed_dim),
+        #  'a': (1, sequence_length + extra - 2, embed_dim),
+        #  'r': (1, sequence_length + extra - 3, embed_dim),
+        #  'g': (1, sequence_length + extra - 3, embed_dim)
+        #}
         embeds = {name: mod(inputs[name]) for name, mod in self.embeds.items()}
 
         def cat_modalities(xs):
+            '''
+            传入的xs时一个四维变量
+            '''
             batch_size, seq_len, dim = xs[0].shape
+            # torch.cat(xs, dim=2)是将所有的xs在seq序列维度上进行拼接
             return torch.cat(xs, dim=2).reshape(batch_size, seq_len * len(xs), dim)
 
-        if mems is None:
+        if mems is None: # todo 后续补充
             history_length = embeds[modality_order[0]].shape[1] - 1
             if num_modalities == num_current:
                 inputs = cat_modalities([embeds[name] for name in modality_order])
@@ -674,8 +693,11 @@ class PredictionNet(nn.Module):
             assert inputs.shape[1] == src_length
             src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask)
         else:
+            # modality_order[0] 表示 z
+            # 获取 序列长度
             sequence_length = embeds[modality_order[0]].shape[1]
             # switch order so that 'currents' are last
+            # (modality_order[num_current:] + modality_order[:num_current])：仅获取0～2 * num_current的部分
             inputs = cat_modalities(
                 [embeds[name] for name in (modality_order[num_current:] + modality_order[:num_current])])
             tgt_length = tgt_length * num_modalities

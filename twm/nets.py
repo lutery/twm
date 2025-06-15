@@ -591,6 +591,11 @@ class PredictionNet(nn.Module):
 
     @lru_cache(maxsize=20)
     def _get_base_mask(self, src_length, tgt_length, device):
+        '''
+        src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
+        tgt_length/src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
+        input.device: 输入的设备
+        '''
         src_mask = torch.ones(tgt_length, src_length, dtype=torch.bool, device=device)
         num_modalities = len(self.modality_order)
         for tgt_index in range(tgt_length):
@@ -606,9 +611,15 @@ class PredictionNet(nn.Module):
         return src_mask
 
     def _get_mask(self, src_length, tgt_length, device, stop_mask):
+        '''
+        src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
+        tgt_length/src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
+        input.device: 输入的设备
+        stop_mask: 停止掩码，shape is (1, sequence_length + extra - 3)
+        '''
         # prevent attention over episode ends using stop_mask
-        num_modalities = len(self.modality_order)
-        assert stop_mask.shape[1] * num_modalities + self.num_current == src_length
+        num_modalities = len(self.modality_order) # 模态数量
+        assert stop_mask.shape[1] * num_modalities + self.num_current == src_length # 确认输入的src_length和stop_mask的长度是相同的
 
         src_mask = self._get_base_mask(src_length, tgt_length, device)
 

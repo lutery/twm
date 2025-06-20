@@ -595,13 +595,15 @@ class PredictionNet(nn.Module):
         src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
         tgt_length/src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
         input.device: 输入的设备
+        todo 函数在 Transformer XL 架构中创建了一个基础注意力掩码，用于控制序列中哪些位置可以相互关注
         '''
+        # 初始化全为1的掩码，表示默认所有位置都被掩蔽（不允许注意力）
         src_mask = torch.ones(tgt_length, src_length, dtype=torch.bool, device=device)
         num_modalities = len(self.modality_order)
         for tgt_index in range(tgt_length):
             # the last indices are always 'current'
-            start_index = src_length - self.num_current
-            src_index = src_length - tgt_length + tgt_index
+            start_index = src_length - self.num_current # 计算当前模态的起始索引，其中num_current是当前模态的数量
+            src_index = src_length - tgt_length + tgt_index # 
             modality_index = (src_index - start_index) % num_modalities
             if modality_index < self.num_current:
                 start = max(src_index - (self.memory_length + 1) * num_modalities, 0)
@@ -618,18 +620,20 @@ class PredictionNet(nn.Module):
         stop_mask: 停止掩码，shape is (1, sequence_length + extra - 3)
         '''
         # prevent attention over episode ends using stop_mask
-        num_modalities = len(self.modality_order) # 模态数量
+        num_modalities = len(self.modality_order) # 模态数量（如'z', 'a', 'r', 'g'）
         assert stop_mask.shape[1] * num_modalities + self.num_current == src_length # 确认输入的src_length和stop_mask的长度是相同的
 
+        # 获取基础掩码 todo
+        # 返回一个[tgt_length, src_length]布尔张量，强制执行因果关系和固定记忆窗口。True表示该位置被掩码（不可关注）。
         src_mask = self._get_base_mask(src_length, tgt_length, device)
 
         batch_size, seq_length = stop_mask.shape
-        stop_mask = stop_mask.t()
-        stop_mask_shift_right = torch.cat([stop_mask.new_zeros(1, batch_size), stop_mask], dim=0)
-        stop_mask_shift_left = torch.cat([stop_mask, stop_mask.new_zeros(1, batch_size)], dim=0)
+        stop_mask = stop_mask.t() # 这里是进行转置，shape is (sequence_length + extra - 3, batch_size)
+        stop_mask_shift_right = torch.cat([stop_mask.new_zeros(1, batch_size), stop_mask], dim=0) # 在开头添加一行零。
+        stop_mask_shift_left = torch.cat([stop_mask, stop_mask.new_zeros(1, batch_size)], dim=0) # 在末尾添加一行零。
 
-        tril = stop_mask.new_ones(seq_length + 1, seq_length + 1).tril()
-        src = torch.logical_and(stop_mask_shift_left.unsqueeze(0), tril.unsqueeze(-1))
+        tril = stop_mask.new_ones(seq_length + 1, seq_length + 1).tril() # 创建一个下三角矩阵，形状为 (sequence_length + 1, sequence_length + 1)，用于确保注意力只关注当前和之前的时间步。
+        src = torch.logical_and(stop_mask_shift_left.unsqueeze(0), tril.unsqueeze(-1)) # 
         src = torch.cummax(src.flip(1), dim=1).values.flip(1)
 
         shifted_tril = stop_mask.new_ones(seq_length + 1, seq_length + 1).tril(diagonal=-1)
@@ -657,7 +661,7 @@ class PredictionNet(nn.Module):
             'z': z, shape is (1, sequence_length + extra - 1, z_categoricals * z_categories)
             'a': a, shape is (1, sequence_length + extra - 2)
             'r': r, shape is (1, sequence_length + extra - 3)
-            'g': g shape is (1, sequence_length + extra - 3)
+            'g': g shape is (1, sequence_length + extra - 3) (结束表示)
         }
         2: tgt_length: 目标长度，sequence_length + extra - 2 或者 sequence_length + extra - 1
         stop_mask: d shape is (1, sequence_length + extra - 3)

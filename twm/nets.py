@@ -349,6 +349,13 @@ class TransposeCNN(_MultilayerModule):
 class TransformerXLDecoder(nn.Module):
 
     def __init__(self, decoder_layer, num_layers, max_length, mem_length, batch_first=False):
+        '''
+        decoder_layer: TransformerXLDecoderLayer(embed_dim, feedforward_dim, head_dim, num_heads, activation, dropout_p)
+        num_layers: config['dyn_num_layers']
+        max_length: 1 + config['wm_sequence_length'] * 模态数量(4) + 当前模态数量(2) | 1 + config['wm_sequence_length'] * len( ['z', 'a', 'r'(存在config: dyn_input_rewards则有), 'g'(存在dyn_input_discounts则有)]) + num_current: 2
+        mem_length: config['wm_memory_length'] * 模态数量(4) + 当前模态数量(2) | config['wm_memory_length'] * len( ['z', 'a', 'r'(存在config: dyn_input_rewards则有), 'g'(存在dyn_input_discounts则有)]) + num_current: 2
+        batch_first=True: 输入的batch维度在第一维
+        '''
         super().__init__()
         # 构建多个transformer解码层
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
@@ -364,6 +371,9 @@ class TransformerXLDecoder(nn.Module):
         nn.init.xavier_uniform_(self.v_bias)
 
     def init_mems(self):
+        '''
+        返回的 mems 是一个列表，长度为 num_layers + 1，每个元素是一个空张量
+        '''
         if self.mem_length > 0:
             param = next(self.parameters())
             dtype, device = param.dtype, param.device
@@ -375,19 +385,29 @@ class TransformerXLDecoder(nn.Module):
             return None
 
     def forward(self, x, positions, attn_mask, mems=None, tgt_length=None, return_attention=False):
+        '''
+        inputs/x shape is (batch_size, src_length, embed_dim)
+        positions shape is (src_length,) 一个从 src_length - 1 到 0 的张量
+        src_mask/attn_mask shape is (tgt_length, src_length, batch_size)
+        mems shape is [num_layers + 1, mem_length, batch_size, embed_dim] if mems is not None
+        tgt_length: 目标长度，sequence_length + extra - 2 或者 sequence_length + extra - 1
+        return_attention: 是否返回注意力，默认为 False
+        '''
         if self.batch_first:
+            # todo 实际运行确认这里是否有问题
             x = x.transpose(0, 1)
 
         if mems is None:
+            # 如果没有提供记忆，则初始化记忆，初始化的记忆全0，shape 是 
             mems = self.init_mems()
 
         if tgt_length is None:
             tgt_length = x.shape[0]
         assert tgt_length > 0
 
-        pos_enc = self.pos_enc(positions)
-        hiddens = [x]
-        attentions = []
+        pos_enc = self.pos_enc(positions) # pos_enc shape (src_length, 1, dim)
+        hiddens = [x] # 存储每一个解码层的输出以及第一层的输入
+        attentions = [] # 存储每一个解码层的注意力
         out = x
         for i, layer in enumerate(self.layers):
             out, attention = layer(out, pos_enc, self.u_bias, self.v_bias, attn_mask=attn_mask, mems=mems[i])
@@ -414,6 +434,14 @@ class TransformerXLDecoder(nn.Module):
 class TransformerXLDecoderLayer(nn.Module):
 
     def __init__(self, dim, feedforward_dim, head_dim, num_heads, activation, dropout_p, layer_norm_eps=1e-5):
+        '''
+        embed_dim/dim: 环境特征的维度，config['dyn_embed_dim']
+        feedforward_dim: 前馈网络的维度，config['dyn_feedforward_dim']
+        head_dim: 注意力头的维度，config['dyn_head_dim']
+        num_heads: 注意力头的数量，config['dyn_num_heads']
+        activation: 激活函数，config['dyn_act']
+        dropout_p: dropout的概率，config['dyn_dropout']
+        '''
         super().__init__()
         self.dim = dim
         self.head_dim = head_dim
@@ -432,6 +460,14 @@ class TransformerXLDecoderLayer(nn.Module):
         return self.dropout(x)
 
     def forward(self, x, pos_encodings, u_bias, v_bias, attn_mask=None, mems=None):
+        '''
+        out/x shape is (src_length, batch_size, embed_dim)
+        pos_enc/pos_encodings shape is (src_length, 1, dim)
+        self.u_bias shape is (num_heads, head_dim)
+        self.v_bias shape is (num_heads, head_dim)
+        attn_mask shape is (tgt_length, src_length, batch_size)
+        mems[i]/mems shape is empty tensor if 传入给Transformer是空的张量
+        '''
         out, attention = self.self_attn(x, pos_encodings, u_bias, v_bias, attn_mask, mems)
         out = self.dropout(out)
         out = self.norm1(x + out)
@@ -442,11 +478,17 @@ class TransformerXLDecoderLayer(nn.Module):
 class RelativeMultiheadSelfAttention(nn.Module):
 
     def __init__(self, dim, head_dim, num_heads, dropout_p):
+        '''
+        dim: 环境特征的维度，config['dyn_embed_dim']
+        head_dim: 注意力头的维度，config['dyn_head_dim']
+        num_heads: 注意力头的数量，config['dyn_num_heads']
+        dropout_p: dropout的概率，config['dyn_dropout']
+        '''
         super().__init__()
         self.dim = dim
         self.head_dim = head_dim
         self.num_heads = num_heads
-        self.scale = 1 / (dim ** 0.5)
+        self.scale = 1 / (dim ** 0.5) # todo 这是在干嘛
 
         self.qkv_proj = nn.Linear(dim, 3 * num_heads * head_dim, bias=False)
         self.pos_proj = nn.Linear(dim, num_heads * head_dim, bias=False)
@@ -454,38 +496,75 @@ class RelativeMultiheadSelfAttention(nn.Module):
         self.dropout = nn.Dropout(dropout_p) if dropout_p > 0 else nn.Identity()
 
     def _rel_shift(self, x):
+        '''
+        x: shape is (tgt_length, pos_len, batch_size, num_heads)
+        '''
         zero_pad = torch.zeros((x.shape[0], 1, *x.shape[2:]), device=x.device, dtype=x.dtype)
-        x_padded = torch.cat([zero_pad, x], dim=1)
-        x_padded = x_padded.view(x.shape[1] + 1, x.shape[0], *x.shape[2:])
-        x = x_padded[1:].view_as(x)
+        x_padded = torch.cat([zero_pad, x], dim=1) # 给x前面填充一个零向量，shape is (tgt_length, pos_len + 1, batch_size, num_heads)
+        x_padded = x_padded.view(x.shape[1] + 1, x.shape[0], *x.shape[2:]) # shape is (pos_len + 1, tgt_length, batch_size, num_heads)，像是交换了0/1维度
+        x = x_padded[1:].view_as(x) # 取出除了第一个位置的所有位置，shape is (pos_len, tgt_length, batch_size, num_heads)
+        # 经过这种变换，可以使得相邻位置的数据进行一次偏移，提高位置的信息，能够捕捉更多的相对位置信息
+        '''
+        类似以下这种
+        [1, 2, 3, 4]
+        [5, 6, 7, 8]
+
+        ->
+        [2, 3, 4, 5]
+        [6, 7, 8, 1]
+        '''
         return x
 
     def forward(self, x, pos_encodings, u_bias, v_bias, attn_mask=None, mems=None):
+        '''
+        out/x shape is (src_length, batch_size, embed_dim) 这里面混合了环境特征、奖励、中断信息、动作
+        pos_enc/pos_encodings shape is (src_length, 1, dim)
+        self.u_bias shape is (num_heads, head_dim)
+        self.v_bias shape is (num_heads, head_dim)
+        attn_mask shape is (tgt_length, src_length, batch_size)
+        mems[i]/mems shape is empty tensor if 传入给Transformer是空的张量
+        '''
         tgt_length, batch_size = x.shape[:2]
         pos_len = pos_encodings.shape[0]
+        # tgt_length = pos_len
 
         if mems is not None:
-            cat = torch.cat([mems, x], dim=0)
-            qkv = self.qkv_proj(cat)
-            q, k, v = torch.chunk(qkv, 3, dim=-1)
-            q = q[-tgt_length:]
+            cat = torch.cat([mems, x], dim=0) # 混合历史信息和当前信息 shape is (src_length + mem_length, batch_size, embed_dim)
+            qkv = self.qkv_proj(cat) # qkv shape is (src_length + mem_length, batch_size, 3 * num_heads * head_dim)
+            q, k, v = torch.chunk(qkv, 3, dim=-1) # q, k, v shape is (src_length + mem_length, batch_size, num_heads * head_dim)
+            q = q[-tgt_length:] # 只取当前目标长度的查询向量 q shape is (tgt_length, batch_size, num_heads * head_dim)
         else:
-            qkv = self.qkv_proj(x)
-            q, k, v = torch.chunk(qkv, 3, dim=-1)
+            qkv = self.qkv_proj(x) # shape is (src_length, batch_size, 3 * num_heads * head_dim)
+            q, k, v = torch.chunk(qkv, 3, dim=-1) # q, k, v shape is (src_length, batch_size, num_heads * head_dim)
 
-        pos_encodings = self.pos_proj(pos_encodings)
+        pos_encodings = self.pos_proj(pos_encodings) # pos_encodings shape is (pos_len, 1, num_heads * head_dim)
 
-        src_length = k.shape[0]
+        src_length = k.shape[0] # src_length is src_length + mem_length or src_length
         num_heads = self.num_heads
         head_dim = self.head_dim
 
-        q = q.view(tgt_length, batch_size, num_heads, head_dim)
-        k = k.view(src_length, batch_size, num_heads, head_dim)
-        v = v.view(src_length, batch_size, num_heads, head_dim)
-        pos_encodings = pos_encodings.view(pos_len, num_heads, head_dim)
+        q = q.view(tgt_length, batch_size, num_heads, head_dim) # shape is (tgt_length, batch_size, num_heads, head_dim)
+        k = k.view(src_length, batch_size, num_heads, head_dim) # todo shape is (src_length, batch_size, num_heads, head_dim)
+        v = v.view(src_length, batch_size, num_heads, head_dim) # todo shape is (src_length, batch_size, num_heads, head_dim)
+        pos_encodings = pos_encodings.view(pos_len, num_heads, head_dim) # shape is (pos_len, num_heads, head_dim)
 
-        content_score = torch.einsum('ibnd,jbnd->ijbn', (q + u_bias, k))
-        pos_score = torch.einsum('ibnd,jnd->ijbn', (q + v_bias, pos_encodings))
+        # q + u_bias: 增加偏置
+        # ibnd (q + u_bias)，jbnd (k)
+        # 输出输出: ijbn，这里面的jbnd是指的是维度
+        # 根据ibnd,jbnd->ijb表示在D维度上进行点积运算
+        '''
+        # 对于每个位置:
+        for i in range(tgt_length):
+            for j in range(src_length):
+                for b in range(batch_size):
+                    for n in range(num_heads):
+                        content_score[i,j,b,n] = sum(
+                            (q[i,b,n,d] + u_bias[n,d]) * k[j,b,n,d]
+                            for d in range(head_dim)
+                        )
+        '''
+        content_score = torch.einsum('ibnd,jbnd->ijbn', (q + u_bias, k)) # contetn_score shape is (tgt_length, src_length, batch_size, num_heads) # 计算注意力分数矩阵\包含相对位置编码的偏置项
+        pos_score = torch.einsum('ibnd,jnd->ijbn', (q + v_bias, pos_encodings)) # 同理，pos_score shape is (tgt_length, pos_len, batch_size, num_heads) 捕获序列中的相对位置关系、处理长距离依赖、增强位置感知能力
         pos_score = self._rel_shift(pos_score)
 
         # [tgt_length x src_length x batch_size x num_heads]
@@ -511,6 +590,11 @@ class RelativeMultiheadSelfAttention(nn.Module):
 class PositionalEncoding(nn.Module):
 
     def __init__(self, dim, max_length, dropout_p=0, batch_first=False):
+        '''
+        decoder_layer.dim: 环境特征的维度，config['dyn_embed_dim']
+        max_length: 1 + config['wm_sequence_length'] * 模态数量(4) + 当前模态数量(2) | 1 + config['wm_sequence_length'] * len( ['z', 'a', 'r'(存在config: dyn_input_rewards则有), 'g'(存在dyn_input_discounts则有)]) + num_current: 2
+        dropout_p: config['dyn_dropout']
+        '''
         super().__init__()
         self.dim = dim
         self.max_length = max_length
@@ -519,12 +603,23 @@ class PositionalEncoding(nn.Module):
 
         encodings = torch.zeros(max_length, dim)
         position = torch.arange(0, max_length, dtype=torch.float).unsqueeze(1)
+        # torch.arange(0, dim, 2) 生成 [0, 2, 4, ..., dim-2] 的偶数序列，长度是dim/2
+        # -math.log(10000.0) = -4
+        # (-math.log(10000.0) / dim) = -0.015625
+        # torch.exp(0) = 1.0
+        # torch.exp(-0.015625) = 0.98449644
         div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
         encodings[:, 0::2] = torch.sin(position * div_term)
         encodings[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer('encodings', encodings)
 
     def forward(self, positions):
+        '''
+        positions shape is (src_length,) 一个从 src_length - 1 到 0 的张量
+        return shape is (1, src_length, dim) if batch_first=True
+        return shape is (src_length, 1, dim) if batch_first=False
+        这里的positions是一个从 src_length - 1 到 0 的张量，表示位置编码的索引
+        '''
         out = self.encodings[positions]
         out = self.dropout(out)
         return out.unsqueeze(0) if self.batch_first else out.unsqueeze(1)
@@ -618,6 +713,8 @@ class PredictionNet(nn.Module):
         tgt_length/src_length: 历史序列长度 * 模态数量 + 当前模态数量=cat z\a\r\g的总长度 (sequence_length + extra - 1 - 1) * 模态数量(4) + 当前模态数量(2)
         input.device: 输入的设备
         stop_mask: 停止掩码，shape is (1, sequence_length + extra - 3)
+
+        todo 后续调试
         '''
         # prevent attention over episode ends using stop_mask
         num_modalities = len(self.modality_order) # 模态数量（如'z', 'a', 'r', 'g'）
@@ -633,14 +730,14 @@ class PredictionNet(nn.Module):
         stop_mask_shift_left = torch.cat([stop_mask, stop_mask.new_zeros(1, batch_size)], dim=0) # 在末尾添加一行零。
 
         tril = stop_mask.new_ones(seq_length + 1, seq_length + 1).tril() # 创建一个下三角矩阵，形状为 (sequence_length + 1, sequence_length + 1)，用于确保注意力只关注当前和之前的时间步。
-        src = torch.logical_and(stop_mask_shift_left.unsqueeze(0), tril.unsqueeze(-1)) # 
-        src = torch.cummax(src.flip(1), dim=1).values.flip(1)
+        src = torch.logical_and(stop_mask_shift_left.unsqueeze(0), tril.unsqueeze(-1)) # 利用创建的下三角矩阵去限制注意力的范围
+        src = torch.cummax(src.flip(1), dim=1).values.flip(1) # todo src[i, j]为True表示从源位置j到目标位置i之间存在片段结束，防止跨片段关注。
 
         shifted_tril = stop_mask.new_ones(seq_length + 1, seq_length + 1).tril(diagonal=-1)
         tgt = torch.logical_and(stop_mask_shift_right.unsqueeze(1), shifted_tril.unsqueeze(-1))
-        tgt = torch.cummax(tgt, dim=0).values
+        tgt = torch.cummax(tgt, dim=0).values # todo 沿目标维度向前传播"片段结束"信号。如果目标i是新片段的一部分，则不能关注前一片段的位置j
 
-        idx = torch.logical_and(src, tgt)
+        idx = torch.logical_and(src, tgt) # 合并两个条件。最终idx为True表示注意力对(i, j)跨越了片段边界。
 
         i, j, k = idx.shape
         idx = idx.reshape(i, 1, j, 1, k).expand(i, num_modalities, j, num_modalities, k) \
@@ -653,7 +750,7 @@ class PredictionNet(nn.Module):
 
         src_mask = src_mask.unsqueeze(-1).tile(1, 1, batch_size)
         src_mask[idx] = True
-        return src_mask
+        return src_mask # 返回最终组合的掩码，用于Transformer的注意力机制。
 
     def forward(self, inputs, tgt_length, stop_mask, heads=None, mems=None, return_attention=False):
                 '''
@@ -713,6 +810,7 @@ class PredictionNet(nn.Module):
             src_length = history_length * num_modalities + num_current
             # 而以上* num_modalities + num_current就是为了计算拼接后的长度
             assert inputs.shape[1] == src_length
+            # src mask shape is [tgt_length, src_length, batch_size]
             src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask)
         else:
             # todo 后续补充

@@ -77,9 +77,19 @@ class WorldModel(nn.Module):
         target_weights = (~d[:, 1:]).float() # target_weights shape is (1, -1 + sequence_length + extra - 2)，表示非结束状态的权重
         tgt_length = target_logits.shape[1] # 获取序列长度  tgt_length is sequence_length + extra - 2
 
+        '''
+        out/preds shape is {
+            'z': (batch_size, tgt_length / num_modalities, z_dim),
+            'r': (batch_size, tgt_length / num_modalities, 1),
+            'g': (batch_size, tgt_length / num_modalities, 1)
+        }
+        hiddens/h shape is (batch_size, tgt_length / num_modalities, dim)
+        mems shape is [num_layers + 1, mem_length, batch_size, dim]
+        '''
         preds, h, mems = dyn_model.predict(z, a, r[:, :-1], g[:, :-1], d[:, :-1], tgt_length, compute_consistency=True)
         dyn_loss, metrics = dyn_model.compute_dynamics_loss(
             preds, h, target_logits=target_logits, target_r=r[:, 1:], target_g=g[:, 1:], target_weights=target_weights)
+        # 优化动态环境模型损失，包含观察模型的潜在分布预测损失、奖励预测损失和折扣预测损失
         self.dyn_optimizer.step(dyn_loss)
         return metrics
 
@@ -558,23 +568,46 @@ class DynamicsModel(nn.Module):
         return (preds, h, mems, attention) if return_attention else (preds, h, mems)
 
     def compute_dynamics_loss(self, preds, h, target_logits, target_r, target_g, target_weights):
+        '''
+        preds: 预测的结果，包含潜在状态、奖励和折扣 shape
+        {
+            'z': (batch_size, tgt_length / num_modalities, z_dim),
+            'r': (batch_size, tgt_length / num_modalities, 1),
+            'g': (batch_size, tgt_length / num_modalities, 1)
+        }
+        h: 隐藏状态 shape is (batch_size, tgt_length / num_modalities, dim)
+        target_logits: 目标的潜在状态 logits，shape is (batch_size, tgt_length, z_categoricals * z_categories)
+        target_r: 目标的奖励，shape is (batch_size, tgt_length - 1, 1)
+        target_g: 目标的折扣，shape is (batch_size, tgt_length - 1, 1)
+        target_weights: 目标的权重，shape is (batch_size, tgt_length - 1) 是中断状态的权重，通常是1或0
+        '''
         assert utils.check_no_grad(target_logits, target_r, target_g, target_weights)
         config = self.config
         losses = []
         metrics = {}
 
-        metrics['h_norm'] = h.norm(dim=-1, p=2).mean().detach()
+        '''
+        h.norm(dim=-1,  # 在最后一个维度上计算范数
+            p=2      # L2范数，也称为欧几里德范数
+        )
+
+        batch_size: 批次大小（通常为1）
+        tgt_length / num_modalities: 目标序列长度除以模态数量
+        dim: 隐藏状态维度（embed_dim）
+        '''
+        metrics['h_norm'] = h.norm(dim=-1, p=2).mean().detach() # shape is (batch_size, tgt_length / num_modalities, dim) 这里仅仅只是记录起来
 
         if 'z' in preds:
+            # 如果环境观察特征包含在预测中
             z_dist = preds['z_dist']
             z_logits = z_dist.base_dist.logits  # use normalized logits
 
             # doesn't check for q == 0
             target_probs = logits_to_probs(target_logits)
-            cross_entropy = -((target_probs * z_logits).sum(-1))
+            cross_entropy = -((target_probs * z_logits).sum(-1)) # 目标的潜在状态 logits 和预测的潜在状态 logits 之间的交叉熵损失
             cross_entropy = cross_entropy.sum(-1)  # independent
-            weighted_cross_entropy = target_weights * cross_entropy
-            weighted_cross_entropy = weighted_cross_entropy.sum() / target_weights.sum()
+            weighted_cross_entropy = target_weights * cross_entropy # 如果是中断状态则权重为0，否则为1
+            weighted_cross_entropy = weighted_cross_entropy.sum() / target_weights.sum() # 计算加权交叉熵损失的平均值
 
             coef = config['dyn_z_coef']
             if coef != 0:
@@ -586,6 +619,7 @@ class DynamicsModel(nn.Module):
                 metrics['z_pred_ce'] = weighted_cross_entropy.detach()
 
             # doesn't check for q == 0
+            # 这边应该还是老一套，预测经过的潜在状态 logits （transformers）和目标的潜在状态 logits 之间的KL散度
             kl = (target_probs * (target_logits - z_logits.detach())).mean()
             kl = F.relu(kl.mean())
             metrics['z_kl'] = kl
@@ -595,7 +629,7 @@ class DynamicsModel(nn.Module):
             r_pred = preds['r']
             coef = config['dyn_reward_coef']
             if coef != 0:
-                r_loss = -coef * r_dist.log_prob(target_r).mean()
+                r_loss = -coef * r_dist.log_prob(target_r).mean() # 计算奖励的负对数似然损失，目标是为了使得r_dist和target_r尽可能接近
                 losses.append(r_loss)
                 metrics['reward_loss'] = r_loss.detach()
                 metrics['reward_mae'] = torch.abs(target_r - r_pred.detach()).mean()
@@ -618,4 +652,7 @@ class DynamicsModel(nn.Module):
         else:
             loss = sum(losses)
             metrics['dyn_loss'] = loss.detach()
+        # 这里的loss是所有损失的总和
+        # metrics是一个字典，包含了所有的指标
+        # 这里的loss是所有损失的总和，包含了潜在状态的交叉熵损失、奖励的负对数似然损失和折扣的负对数似然损失
         return loss, metrics

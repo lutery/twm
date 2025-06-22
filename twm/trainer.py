@@ -272,29 +272,47 @@ class Trainer:
                 idx = idx[:, :-2] # idx shape is (1, sequence_length + extra - 2)
                 # todo 跟进下这边获取的shape具体流程
                 _, a, r, terminated, truncated, _ = replay_buffer.get_data(idx, device=device, prefix=1)
+                # 优化预训练动态模型
                 _ = wm.optimize_pretrain_dyn(z, a, r, terminated, truncated, target_logits)
                 budget -= idx.numel()
                 if budget <= 0:
                     break
 
         # pretrain ac
+        # 这里应该就是在预训练actor-critic模型
         budget = config['pretrain_budget'] * (1 - config['pretrain_obs_p'] + config['pretrain_dyn_p'])
         while budget > 0:
             for idx in replay_buffer.generate_uniform_indices(
                     config['ac_batch_size'], config['ac_horizon'], extra=2):  # 2 for context + next
-                z = obs_model.sample_z(z_dist, idx=idx.flatten())
-                z = z.squeeze(1).unflatten(0, idx.shape)
-                idx = idx[:, :-2]
+                # idx表示用于训练的起始索引位置 shape 应该是 （batch_size, sequence_length + extra)，z是环境分布采样的数据
+                z = obs_model.sample_z(z_dist, idx=idx.flatten()) # z shape is (batch_size (sequence_length + extra), 1(time), z_categoricals * z_categories) 
+                z = z.squeeze(1).unflatten(0, idx.shape) # z shape is (1, sequence_length + extra, z_categoricals * z_categories)
+                idx = idx[:, :-2]# （batch_size, sequence_length + extra - 2)
+                # 获取动作、奖励、终止和截断标志
+                # a shape is (batch_size, sequence_length + extra - 1, num_actions)
+                # r shape is (batch_size, sequence_length + extra - 1, 1)
+                # terminated shape is (batch_size, sequence_length + extra - 1)
+                # truncated shape is (batch_size, sequence_length + extra - 1)
                 _, a, r, terminated, truncated, _ = replay_buffer.get_data(idx, device=device, prefix=1)
+                # d shape is (batch_size, sequence_length + extra - 1)
                 d = torch.logical_or(terminated, truncated)
                 if config['ac_input_h']:
+                    # 获取一个折扣因子的矩阵，如果有位置被终止或截断，则该位置的折扣因子为0
                     g = wm.to_discounts(terminated)
+                    # ac_horizon表示向前预测的步数
                     tgt_length = config['ac_horizon'] + 1
                     with torch.no_grad():
+                        # 利用动态模型预测下一个状态的隐藏状态h shape is (batch_size, tgt_length(- 1 + sequence_length + extra), dyn_embed_dim)
                         _, h, _ = wm.dyn_model.eval().predict(z[:, :-1], a, r, g, d[:, :-1], tgt_length)
                 else:
                     h = None
+                # 获取奖励和折扣因子
+                # g shape is (batch_size, sequence_length + extra - 1)
                 g = wm.to_discounts(d)
+                # z shape is (batch_size, - 1 + sequence_length + extra , z_categoricals * z_categories)
+                # r shape is (batch_size, - 1 + sequence_length + extra , 1)
+                # g shape is (batch_size, - 1 + sequence_length + extra - 1)
+                # d shape is (batch_size, - 1 + sequence_length + extra - 1)
                 z, r, g, d = [x[:, 1:] for x in (z, r, g, d)]
                 _ = ac.optimize_pretrain(z, h, r, g, d)
                 budget -= idx.numel()

@@ -55,6 +55,8 @@ class ActorCritic(nn.Module):
 
     @torch.no_grad()
     def _prepare_inputs(self, z, h):
+        # z shape is (batch_size, - 1 + sequence_length + extra , z_categoricals * z_categories)
+        # h shape is (batch_size, tgt_length(- 1 + sequence_length + extra), dyn_embed_dim)
         assert utils.check_no_grad(z, h)
         assert h is None or utils.same_batch_shape([z, h])
         config = self.config
@@ -63,7 +65,13 @@ class ActorCritic(nn.Module):
             x = torch.cat([z, h], dim=-1)
         else:
             x = z
-        shape = x.shape[:2]
+        # x shape is (batch_size, - 1 + sequence_length + extra, z_categoricals * z_categories + dyn_embed_dim)
+        # or shape is (batch_size, - 1 + sequence_length + extra, z_categoricals * z_categories)
+        shape = x.shape[:2] # (batch_size, sequence_length + extra)
+
+        # x.flatten(0, 1) shape is (batch_size * (sequence_length + extra), z_categoricals * z_categories + dyn_embed_dim) or (batch_size * (sequence_length + extra), z_categoricals * z_categories)
+        # self.trunk is an identity function, so it does not change the shape
+        # .unflatten(0, shape) restores the original shape x shape is (batch_size, sequence_length + extra, z_categoricals * z_categories + dyn_embed_dim) or (batch_size, sequence_length + extra, z_categoricals * z_categories)
         x = self.trunk(x.flatten(0, 1)).unflatten(0, shape)
         return x
 
@@ -103,9 +111,14 @@ class ActorCritic(nn.Module):
         return metrics
 
     def optimize_pretrain(self, z, h, r, g, d):
+        # z shape is (batch_size, - 1 + sequence_length + extra , z_categoricals * z_categories)
+        # h shape is (batch_size, tgt_length(- 1 + sequence_length + extra), dyn_embed_dim)
+        # r shape is (batch_size, - 1 + sequence_length + extra , 1)
+        # g shape is (batch_size, - 1 + sequence_length + extra - 1)
+        # d shape is (batch_size, - 1 + sequence_length + extra - 1)
         config = self.config
-        x = self._prepare_inputs(z, h)
-        returns, advantages = self._compute_targets(x, r, g, d)
+        x = self._prepare_inputs(z, h) # x shape is (batch_size, sequence_length + extra, z_categoricals * z_categories)
+        returns, advantages = self._compute_targets(x, r, g, d) # 计算优势值和目标Q值， shape is (batch_size, sequence_length + extra - 1)
         weights = torch.ones_like(returns)  # no weights, since we use real data
 
         self.train()
@@ -163,6 +176,14 @@ class ActorCritic(nn.Module):
 
     @torch.no_grad()
     def _compute_gae(self, r, g, values, dones=None):
+        '''
+        r shape is (batch_size, sequence_length + extra, 1)
+        g shape is (batch_size, sequence_length + extra - 1)
+        values shape is (batch_size, sequence_length + extra, 1)
+        d shape is (batch_size, sequence_length + extra - 1)
+        计算优势值像ppo中的优势计算
+        return advantages shape is (batch_size, sequence_length + extra - 1)
+        '''
         assert utils.same_batch_shape([r, g])
         assert dones is None or utils.same_batch_shape([r, dones])
         assert utils.same_batch_shape_time_offset(values, r, 1)
@@ -178,6 +199,12 @@ class ActorCritic(nn.Module):
 
     @torch.no_grad()
     def _compute_targets(self, x, r, g, d=None):
+        '''
+        x shape is (batch_size, sequence_length + extra, z_categoricals * z_categories + dyn_embed_dim)
+        r shape is (batch_size, sequence_length + extra, 1)
+        g shape is (batch_size, sequence_length + extra - 1)
+        d shape is (batch_size, sequence_length + extra - 1)
+        '''
         # adopted from https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/buffers.py
         assert utils.same_batch_shape([r, g])
         assert utils.same_batch_shape_time_offset(x, r, 1)
@@ -188,17 +215,22 @@ class ActorCritic(nn.Module):
 
         shape = x.shape[:2]
         if config['critic_target_interval'] > 1:
+            # 大于1表示使用目标网络
             self.target_critic_lag += 1
             if self.target_critic_lag >= config['critic_target_interval']:
                 self.sync_target()
             values = self.target_critic_model(x.flatten(0, 1)).squeeze(-1).unflatten(0, shape)
         else:
+            # 而且小于等于1表示使用当前网络，因为每次都同步不如使用当前网络
+            # values shape is (batch_size, sequence_length + extra, 1)
             values = self.critic_model(x.flatten(0, 1)).squeeze(-1).unflatten(0, shape)
 
-        advantages = self._compute_gae(r, g, values, d)
+        # adv shape is (batch_size, sequence_length + extra - 1) 优势值
+        advantages = self._compute_gae(r, g, values, d) 
+        # returns shape is (batch_size, sequence_length + extra - 1) 预测的Q值
         returns = advantages + values[:, :-1]
         if config['ac_normalize_advantages']:
-            adv_mean = advantages.mean()
+            adv_mean = advantages.mean() # 归一化优势值
             adv_std = torch.std(advantages, unbiased=False)
             advantages = (advantages - adv_mean) / (adv_std + 1e-8)
         return returns, advantages

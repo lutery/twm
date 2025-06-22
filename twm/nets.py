@@ -411,23 +411,32 @@ class TransformerXLDecoder(nn.Module):
         out = x
         for i, layer in enumerate(self.layers):
             out, attention = layer(out, pos_enc, self.u_bias, self.v_bias, attn_mask=attn_mask, mems=mems[i])
+            # out: shape is (tgt_length, batch_size, dim)
+            # attention: shape is (tgt_length, src_length, batch_size, num_heads)
             hiddens.append(out)
             attentions.append(attention)
-
+        
+        # out shape is (tgt_length, batch_size, dim)
         out = out[-tgt_length:]
 
         if self.batch_first:
+            # 将输出的维度从 (tgt_length, batch_size, dim) 转换为 (batch_size, tgt_length, dim)
             out = out.transpose(0, 1)
 
-        assert len(hiddens) == len(mems)
+        assert len(hiddens) == len(mems) # 看来这里的记忆保存的是每一层的输出（记忆）
         with torch.no_grad():
             new_mems = []
             for i in range(len(hiddens)):
-                cat = torch.cat([mems[i], hiddens[i]], dim=0)
-                new_mems.append(cat[-self.mem_length:].detach())
+                cat = torch.cat([mems[i], hiddens[i]], dim=0) # 将当前层的输出和之前的记忆拼接起来
+                new_mems.append(cat[-self.mem_length:].detach()) # 只保留最新的 mem_length 个记忆，因为是有交叉，即最新的记忆包含部分旧的记忆和所有的新记忆
         if return_attention:
-            attention = torch.stack(attentions, dim=-2)
-            return out, new_mems, attention
+            attention = torch.stack(attentions, dim=-2) # 将注意力矩阵堆叠起来，dim=-2 表示在倒数第二个维度上堆叠，那么shape is (tgt_length, src_length, batch_size, num_layers, num_heads)
+            # out shape is (batch_size, tgt_length, dim)
+            # new_mems shape is [num_layers + 1, mem_length, batch_size, dim]
+            # attention shape is (tgt_length, src_length, batch_size, num_layers, num_heads)
+            return out, new_mems, attention 
+        # out shape is (batch_size, tgt_length, dim)
+        # new_mems shape is [num_layers + 1, mem_length, batch_size, dim]
         return out, new_mems
 
 
@@ -467,11 +476,18 @@ class TransformerXLDecoderLayer(nn.Module):
         self.v_bias shape is (num_heads, head_dim)
         attn_mask shape is (tgt_length, src_length, batch_size)
         mems[i]/mems shape is empty tensor if 传入给Transformer是空的张量
+
+        return:
+        out: shape is (tgt_length, batch_size, dim)
+        attention: shape is (tgt_length, src_length, batch_size, num_heads)
         '''
+
+        # attention: 返回注意力分数矩阵 (tgt_length, src_length, batch_size, num_heads)
+        # out: 将上下文向量投影到原始的嵌入维度，shape is (tgt_length, batch_size, dim)
         out, attention = self.self_attn(x, pos_encodings, u_bias, v_bias, attn_mask, mems)
-        out = self.dropout(out)
-        out = self.norm1(x + out)
-        out = self.norm2(out + self._ff(out))
+        out = self.dropout(out) # (tgt_length, batch_size, dim)
+        out = self.norm1(x + out) # 残差连接 shape is (tgt_length, batch_size, dim)
+        out = self.norm2(out + self._ff(out)) # 残差连接 self._ff进一步提取特征 shape is (tgt_length, batch_size, dim)
         return out, attention
 
 
@@ -513,7 +529,7 @@ class RelativeMultiheadSelfAttention(nn.Module):
         [2, 3, 4, 5]
         [6, 7, 8, 1]
         '''
-        return x
+        return x # (pos_len, tgt_length, batch_size, num_heads)
 
     def forward(self, x, pos_encodings, u_bias, v_bias, attn_mask=None, mems=None):
         '''
@@ -565,13 +581,16 @@ class RelativeMultiheadSelfAttention(nn.Module):
         '''
         content_score = torch.einsum('ibnd,jbnd->ijbn', (q + u_bias, k)) # contetn_score shape is (tgt_length, src_length, batch_size, num_heads) # 计算注意力分数矩阵\包含相对位置编码的偏置项
         pos_score = torch.einsum('ibnd,jnd->ijbn', (q + v_bias, pos_encodings)) # 同理，pos_score shape is (tgt_length, pos_len, batch_size, num_heads) 捕获序列中的相对位置关系、处理长距离依赖、增强位置感知能力
-        pos_score = self._rel_shift(pos_score)
+        pos_score = self._rel_shift(pos_score) # todo 结合实际的运行看过程 pos_score shape is (pos_len, tgt_length, batch_size, num_heads)
 
         # [tgt_length x src_length x batch_size x num_heads]
-        attn_score = content_score + pos_score
-        attn_score.mul_(self.scale)
+        attn_score = content_score + pos_score # 将内容分数和位置分数相加，得到最终的注意力分数矩阵 atten_score shape is (tgt_length, src_length, batch_size, num_heads)
+        attn_score.mul_(self.scale) # 缩放因子，将注意力分数矩阵进行缩放，防止梯度消失或爆炸，因为后续的softmax如果值过大或过小，会导致梯度消失或爆炸的问题
 
         if attn_mask is not None:
+            # 这里主要是将注意力分数矩阵attn_mask扩展为4维度，以便与注意力掩码进行广播操作，并且所有被掩码的位置都被设置为负无穷大
+            # 这样做的目的是为了在softmax计算时，将被掩码的位置的注意力分数设置为负无穷大，从而使得softmax计算时这些位置的注意力权重为0
+            # 这样可以确保在计算注意力时，被掩码的位置不会对最终的注意力分布产生影响
             if attn_mask.ndim == 2:
                 attn_score = attn_score.masked_fill(attn_mask[:, :, None, None], -float('inf'))
             elif attn_mask.ndim == 3:
@@ -580,10 +599,13 @@ class RelativeMultiheadSelfAttention(nn.Module):
         # [tgt_length x src_length x batch_size x num_heads]
         attn = F.softmax(attn_score, dim=1)
         return_attn = attn
-        attn = self.dropout(attn)
+        attn = self.dropout(attn) # shape is (tgt_length, src_length, batch_size, num_heads)
 
-        context = torch.einsum('ijbn,jbnd->ibnd', (attn, v))
-        context = context.reshape(context.shape[0], context.shape[1], num_heads * head_dim)
+        context = torch.einsum('ijbn,jbnd->ibnd', (attn, v)) # 计算上下文向量，context shape is (tgt_length, batch_size, num_heads, head_dim)
+        context = context.reshape(context.shape[0], context.shape[1], num_heads * head_dim) # 将多头注意力合并 shape is (tgt_length, batch_size, num_heads * head_dim)
+        # return_attn: 返回注意力分数矩阵 (tgt_length, src_length, batch_size, num_heads)
+        # context: 上下文向量 (tgt_length, batch_size, num_heads * head_dim)
+        # self.out_proj(context): 将上下文向量投影到原始的嵌入维度，shape is (tgt_length, batch_size, dim)
         return self.out_proj(context), return_attn
 
 
@@ -849,18 +871,38 @@ class PredictionNet(nn.Module):
         positions = torch.arange(src_length - 1, -1, -1, device=inputs.device)
         outputs = self.transformer(
             inputs, positions, attn_mask=src_mask, mems=mems, tgt_length=tgt_length, return_attention=return_attention)
+        # out/hiddens shape is (batch_size, tgt_length, dim)
+        # new_mems/mems shape is [num_layers + 1, mem_length, batch_size, dim]
+        # attention shape is (tgt_length, src_length, batch_size, num_layers, num_heads) or None
         hiddens, mems, attention = outputs if return_attention else (outputs + (None,))
 
         # take outputs at last current
         assert hiddens.shape[1] == tgt_length
-        out_idx = torch.arange(tgt_length - 1, -1, -num_modalities, device=inputs.device).flip([0])
-        hiddens = hiddens[:, out_idx]
+        out_idx = torch.arange(tgt_length - 1, -1, -num_modalities, device=inputs.device).flip([0]) # 这里又是将目标长度的索引进行翻转，得到的是每个模态的最后一个位置的索引
+        hiddens = hiddens[:, out_idx] # 取出每个模态的最后一个位置的输出 shape is (batch_size, tgt_length / num_modalities, dim)
         if return_attention:
-            attention = attention[out_idx]
+            attention = attention[out_idx] # attention shape is (tgt_length / num_modalities, src_length, batch_size, num_layers, num_heads)
 
         if heads is None:
-            heads = self.out_heads.keys()
+            heads = self.out_heads.keys()  # 如果没有指定heads，则使用out_heads中的所有头部
 
-        out = {name: self.out_heads[name](hiddens) for name in heads}
+        out = {name: self.out_heads[name](hiddens) for name in heads} # 将提取的特征通过对应的头部进行预测得到需要预测的内容，包含 'z', 'r', 'g'等
+        # out shape is {
+        #   'z': (batch_size, tgt_length / num_modalities, z_dim),
+        #   'r': (batch_size, tgt_length / num_modalities, 1
+        #   'g': (batch_size, tgt_length / num_modalities, 1)
+        #   ...
+        # }
 
+        '''
+        out shape is {
+            'z': (batch_size, tgt_length / num_modalities, z_dim),
+            'r': (batch_size, tgt_length / num_modalities, 1),
+            'g': (batch_size, tgt_length / num_modalities, 1)
+        }
+        hiddens shape is (batch_size, tgt_length / num_modalities, dim)
+        mems shape is [num_layers + 1, mem_length, batch_size, dim]
+        attention shape is (tgt_length / num_modalities, src_length, batch_size, num_layers, num_heads) or None
+        这里的tgt_length / num_modalities 是因为每个模态的输出都是在最后一个位置进行预测的，所以需要除以模态数量
+        '''
         return (out, hiddens, mems, attention) if return_attention else (out, hiddens, mems)

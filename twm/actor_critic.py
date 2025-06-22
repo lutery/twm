@@ -81,8 +81,10 @@ class ActorCritic(nn.Module):
         return logits
 
     def critic(self, x):
+        # x shape (batch_size, sequence_length + extra - 1, z_categoricals * z_categories)
         shape = x.shape[:2]
         values = self.critic_model(x.flatten(0, 1)).squeeze(-1).unflatten(0, shape)
+        # values shape is (batch_size, sequence_length + extra - 1)
         return values
 
     def sync_target(self):
@@ -116,6 +118,7 @@ class ActorCritic(nn.Module):
         # r shape is (batch_size, - 1 + sequence_length + extra , 1)
         # g shape is (batch_size, - 1 + sequence_length + extra - 1)
         # d shape is (batch_size, - 1 + sequence_length + extra - 1)
+        # 总统来说，这里对价值网络来说是在训练价值网络，对动作网络来说是最大化熵
         config = self.config
         x = self._prepare_inputs(z, h) # x shape is (batch_size, sequence_length + extra, z_categoricals * z_categories)
         returns, advantages = self._compute_targets(x, r, g, d) # 计算优势值和目标Q值， shape is (batch_size, sequence_length + extra - 1)
@@ -123,17 +126,23 @@ class ActorCritic(nn.Module):
 
         self.train()
         # remove last time step, the last state is for bootstrapping
-        values = self.critic(x[:, :-1])
-        critic_loss, critic_metrics = self._compute_critic_loss(values, returns, weights)
+        values = self.critic(x[:, :-1]) # values shape is (batch_size, sequence_length + extra - 1)
+        critic_loss, critic_metrics = self._compute_critic_loss(values, returns, weights) # 这边应该是很常见的价值损失，这里就是在训练价值网络
 
         # maximize entropy, ok since data was collected with random policy
         shape = x.shape[:2]
-        logits = self.actor_model(x.flatten(0, 1)).unflatten(0, shape)
-        dist = D.Categorical(logits=logits)
-        max_entropy = math.log(self.num_actions)
-        entropy = dist.entropy().mean()
-        normalized_entropy = entropy / max_entropy
-        actor_loss = -config['actor_entropy_coef'] * normalized_entropy
+        logits = self.actor_model(x.flatten(0, 1)).unflatten(0, shape) # logits shape is (batch_size, sequence_length + extra - 1, num_actions)
+        dist = D.Categorical(logits=logits) # 创建一个分类分布，使用logits作为参数，得到一个动作离散分布，分布的概率和动作网络预测一致
+        max_entropy = math.log(self.num_actions) # 这里就是最大的动作熵
+        entropy = dist.entropy().mean() # 当前预测的动作熵
+        normalized_entropy = entropy / max_entropy # 归一化
+        '''
+        这是一个熵系数，用来控制策略的探索程度：
+
+        值越大，越鼓励策略探索
+        值越小，越倾向于确定性行为
+        '''
+        actor_loss = -config['actor_entropy_coef'] * normalized_entropy # 这里只是在鼓励探索，没有真正的在训练确定性动作，让预测的动作分布更均匀
         actor_metrics = {
             'actor_loss': actor_loss.detach(), 'ent': entropy.detach(), 'norm_ent': normalized_entropy.detach()
         }
@@ -166,10 +175,19 @@ class ActorCritic(nn.Module):
         return loss, metrics
 
     def _compute_critic_loss(self, values, returns, weights):
+        '''
+        values: Critic 网络预测的状态值 shape: (batch_size, sequence_length + extra - 1)
+        returns: 计算的目标 Q 值 shape: (batch_size, sequence_length + extra - 1)
+        weights: 每个样本的权重 shape: (batch_size, sequence_length + extra - 1)
+        '''
         assert utils.check_no_grad(returns, weights)
-        value_dist = D.Normal(values, torch.ones_like(values))
-        loss = -(weights * value_dist.log_prob(returns)).mean()
-        mae = torch.abs(returns - values.detach()).mean()
+        value_dist = D.Normal(values, torch.ones_like(values)) # 模拟创建一个符合values的正太分布
+        # value_dist.log_prob(returns): 计算 returns 在正态分布下的对数概率，计算离values的距离，因为正太分布的概率就是离均值的距离
+        # weights: 每个样本的权重，在预训练时，这里是全1
+        # loss: 计算损失，使用负对数似然损失，表示预测的值与目标值之间的距离
+        # mean()：对所有样本的损失取平均
+        loss = -(weights * value_dist.log_prob(returns)).mean() 
+        mae = torch.abs(returns - values.detach()).mean() # 计算平均绝对误差
         metrics = {'critic_loss': loss.detach(), 'critic_mae': mae, 'critic': values.detach().mean(),
                    'returns': returns.mean()}
         return loss, metrics

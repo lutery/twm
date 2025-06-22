@@ -179,7 +179,7 @@ class ReplayBuffer:
 
     def step(self, policy_fn):
         '''
-        policy_fn: 是一个lambda函数，输入当前的index，输出一个动作，实际上index没有使用
+        policy_fn: 是一个lambda函数，输入当前的index，输出一个动作，在预训练阶段index没有使用 ，在训练阶段有用
         '''
         config = self.config
         index = self.size

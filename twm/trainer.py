@@ -89,15 +89,16 @@ class Trainer:
 
         @torch.no_grad()
         def policy(index):
-            nonlocal dreamer
+            nonlocal dreamer # 这里应该是类似static，用于在函数内部修改外部变量
             if dreamer is None:
                 prefix = config['wm_memory_length'] - 1
-                start_o = replay_buffer.get_obs([[index]], device=device, prefix=prefix + 1)
+                start_o = replay_buffer.get_obs([[index]], device=device, prefix=prefix + 1) # 从这里来看感觉o和a差了一个时间步 todo
                 start_a = replay_buffer.get_actions([[index - 1]], device=device, prefix=prefix)
                 start_r = replay_buffer.get_rewards([[index - 1]], device=device, prefix=prefix)
                 start_terminated = replay_buffer.get_terminated([[index - 1]], device=device, prefix=prefix)
                 start_truncated = replay_buffer.get_truncated([[index - 1]], device=device, prefix=prefix)
 
+                # todo 到这里
                 dreamer = Dreamer(config, wm, mode='observe', ac=ac, store_data=False)
                 dreamer.observe_reset(start_o, start_a, start_r, start_terminated, start_truncated)
                 a = dreamer.act()
@@ -160,12 +161,12 @@ class Trainer:
         self.summarizer.append(metrics)
         wandb.log(self.summarizer.summarize())
 
-        budget = config['budget'] - config['pretrain_budget']
+        budget = config['budget'] - config['pretrain_budget'] # 计算剩余的预算
         budget_per_step = 0
         budget_per_step += config['wm_train_steps'] * config['wm_batch_size'] * config['wm_sequence_length']
-        budget_per_step += config['ac_batch_size'] * config['ac_horizon']
-        num_batches = budget / budget_per_step
-        train_every = (replay_buffer.capacity - config['buffer_prefill']) / num_batches
+        budget_per_step += config['ac_batch_size'] * config['ac_horizon'] # 这里应该是计算每一步的预算
+        num_batches = budget / budget_per_step # 计算总共需要多少个批次来完成训练
+        train_every = (replay_buffer.capacity - config['buffer_prefill']) / num_batches # 这里确实是在训练剩余需要收集的数据量平均分配给每个批次，用于控制训练和收集的频率
 
         step_counter = 0
         while replay_buffer.size < replay_buffer.capacity:
@@ -318,6 +319,8 @@ class Trainer:
                 budget -= idx.numel()
                 if budget <= 0:
                     break
+        
+        # 完成预训练后，将动作价值网络完全同步一次到目标网络
         ac.sync_target()
 
     def _train_step(self):
@@ -370,6 +373,7 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self, is_final):
+        # todo 后续调试查看
         start_time = time.time()
         config = self.config
         agent = self.agent

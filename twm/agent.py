@@ -20,6 +20,15 @@ class Dreamer:
     # step:  a_t => s_t+1, h_t, r_t, d_t
 
     def __init__(self, config, wm, mode, ac=None, store_data=False, start_z_sampler=None, always_compute_obs=False):
+        '''
+        config: 配置
+        wm: WorldModel 实例
+        mode: 'imagine' 或 'observe'
+        ac: ActorCritic 实例 (仅在 mode='imagine' 时使用)
+        store_data: 是否存储数据
+        start_z_sampler: 用于生成初始状态 z 的采样器 (仅在 mode='imagine' 时使用)
+        always_compute_obs: 是否在每一步都计算观察
+        '''
         assert mode in ('imagine', 'observe')
         assert mode != 'imagine' or start_z_sampler is not None
         self.config = config

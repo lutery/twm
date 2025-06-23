@@ -33,7 +33,7 @@ class ReplayBuffer:
         self.sample_visits = torch.zeros(capacity, dtype=torch.long, device='cpu')  # we sample indices on cpu
 
         self.capacity = capacity
-        self.size = 0
+        self.size = 0 # 缓存的大小
         self.total_reward = 0
         self.score = 0
         self.episode_lengths = []
@@ -237,9 +237,10 @@ class ReplayBuffer:
         return probs
 
     def sample_indices(self, max_batch_size, sequence_length):
-        n = self.size - sequence_length + 1
+        n = self.size - sequence_length + 1 # 计算可采样的索引范围，size - sequence_length + 1
         batch_size = max_batch_size
         if batch_size * sequence_length > n:
+            # 这里是为了限制采样的数据不能互相交叉吧？
             raise ValueError('Not enough data in buffer')
 
         probs = self._compute_visit_probs(n)

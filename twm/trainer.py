@@ -187,6 +187,7 @@ class Trainer:
                     should_log = True
 
             # train world model and actor-critic
+            # 在这里训练世界模型和ac模型
             metrics_hist = []
             while step_counter >= train_every:
                 step_counter -= train_every

@@ -32,7 +32,7 @@ CONFIGS['default'] = {
     # world model
     'wm_batch_size': 100, # 每次训练的批次大小
     'wm_sequence_length': 16, # 每次训练的序列长度
-    'wm_train_steps': 1,
+    'wm_train_steps': 1, # 每次训练的轮数
     'wm_memory_length': 16,
     'wm_discount_threshold': 0.1,
 

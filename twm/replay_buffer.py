@@ -31,6 +31,7 @@ class ReplayBuffer:
         self.timesteps = torch.zeros(capacity + 1, dtype=torch.long, device=device)
         self.timesteps[0] = 0
         self.sample_visits = torch.zeros(capacity, dtype=torch.long, device='cpu')  # we sample indices on cpu
+        # sample_vistis应该是每个样本的采样次数
 
         self.capacity = capacity
         self.size = 0 # 缓存的大小
@@ -148,7 +149,10 @@ class ReplayBuffer:
         return x
 
     def get_obs(self, idx, device=None, prefix=0, return_next=False):
-        # return obs : [wm_total_batch_size, frame_stack, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, frame_stack, h, w, c]
+        '''
+        idx: idx shape is wm_batch_size, wm_sequence_length 采样的索引
+        '''
+        # return obs : [wm_total_batch_size, frame_stack/wm_sequence_length, h, w, c] 或者 [1 + prefix + wm_total_batch_size + 1, frame_stack, h, w, c]
         # 或 return obs: [1, 1 + prefix + replay.size, frame_stack, h, w, c]
         obs = self._get(self.obs, idx, device, prefix, return_next=return_next, allow_last=True)
         return utils.preprocess_atari_obs(obs, device)
@@ -169,12 +173,15 @@ class ReplayBuffer:
         return self._get(self.timesteps, idx, device, prefix, allow_last=True)
 
     def get_data(self, idx, device=None, prefix=None, return_next_obs=False):
-        obs = self.get_obs(idx, device, prefix, return_next_obs)
-        actions = self.get_actions(idx, device, prefix)
-        rewards = self.get_rewards(idx, device, prefix)
-        terminated = self.get_terminated(idx, device, prefix)
-        truncated = self.get_truncated(idx, device, prefix)
-        timesteps = self.get_timesteps(idx, device, prefix)
+        '''
+        idx: idx shape is wm_batch_size, wm_sequence_length 采样的索引
+        '''
+        obs = self.get_obs(idx, device, prefix, return_next_obs)# obs shape is [wm_total_batch_size, wm_sequence_length, h, w, c]
+        actions = self.get_actions(idx, device, prefix)# actions shape is [wm_total_batch_size, wm_sequence_length]
+        rewards = self.get_rewards(idx, device, prefix)# rewards shape is [wm_total_batch_size, wm_sequence_length]
+        terminated = self.get_terminated(idx, device, prefix) # terminated shape is [wm_total_batch_size, wm_sequence_length]
+        truncated = self.get_truncated(idx, device, prefix) # truncated shape is [wm_total_batch_size, wm_sequence_length]
+        timesteps = self.get_timesteps(idx, device, prefix) # timesteps shape is [wm_total_batch_size, wm_sequence_length]
         return obs, actions, rewards, terminated, truncated, timesteps
 
     def step(self, policy_fn):
@@ -222,8 +229,16 @@ class ReplayBuffer:
             self.score = 0
 
     def _compute_visit_probs(self, n):
+        '''
+        这个方法计算了经验回放缓冲区中各个样本被采样的概率，目的是实现优先回放机制
+
+        这个方法根据样本被访问的次数，计算每个样本被采样的概率，使用访问次数越少的样本被采样的概率越高，从而实现更均匀的样本探索
+
+        return : 返回一个形状为(n,)的张量，表示每个样本被采样的概率
+        '''
         temperature = self.config['buffer_temperature']
         if temperature == 'inf':
+            # 如果temperature为'inf'，则使用均匀分布采样，即每个样本的采样概率相等
             visits = self.sample_visits[:n].float()
             visit_sum = visits.sum()
             if visit_sum == 0:
@@ -231,6 +246,9 @@ class ReplayBuffer:
             else:
                 probs = 1 - visits / visit_sum
         else:
+            # 如果temperature不为'inf'，则使用softmax函数计算采样概率
+            # 这里的softmax函数将访问次数转换为概率分布，访问次数越少的样本被采样的概率越高
+            # logits = -visits
             logits = self.sample_visits[:n].float() / -temperature
             probs = F.softmax(logits, dim=0)
         assert probs.device.type == 'cpu'
@@ -243,17 +261,52 @@ class ReplayBuffer:
             # 这里是为了限制采样的数据不能互相交叉吧？
             raise ValueError('Not enough data in buffer')
 
-        probs = self._compute_visit_probs(n)
-        start_idx = torch.multinomial(probs, batch_size, replacement=False)
+        probs = self._compute_visit_probs(n) # shape is (n,)
+        # torch.multinomial 是 PyTorch 中用于从给定概率分布中进行采样的函数
+        '''
+        input: 包含每个类别概率的一维张量
+        num_samples: 要抽取的样本数量
+        replacement: 是否可以重复抽取
+
+        返回采样得到的起始索引
+        '''
+        start_idx = torch.multinomial(probs, batch_size, replacement=False) # start_idx shape is (batch_size,)
 
         # stay on cpu
-        flat_idx = start_idx.reshape(-1)
-        flat_idx, counts = torch.unique(flat_idx, return_counts=True)
-        self.sample_visits[flat_idx] += counts
+        flat_idx = start_idx.reshape(-1) # flat_dix shape is (batch_size,)
+        # 用于返回张量中唯一元素的函数
+        '''
+        input: 输入张量
+        sorted: 是否按升序排列返回的唯一元素（默认为 True）
+        return_inverse: 是否返回可用于重建原始张量的索引（默认为 False）
+        return_counts: 是否返回每个唯一元素出现的次数（默认为 False）
+        dim: 在指定维度上查找唯一元素（默认为 None，表示将张量视为一维）
+
+        返回：
+        唯一元素的张量
+        唯一元素和对应的逆索引
+        唯一元素和对应的计数
+        上述三者的组合
+
+        实际例子
+        假设 start_idx = tensor([5, 10, 5, 20, 10])
+
+        flat_idx = start_idx.reshape(-1) → tensor([5, 10, 5, 20, 10])
+        flat_idx, counts = torch.unique(flat_idx, return_counts=True) →
+        flat_idx = tensor([5, 10, 20]) (唯一元素)
+        counts = tensor([2, 2, 1]) (对应元素出现次数)
+        self.sample_visits[flat_idx] += counts:
+        self.sample_visits[5] += 2
+        self.sample_visits[10] += 2
+        self.sample_visits[20] += 1
+        '''
+        flat_idx, counts = torch.unique(flat_idx, return_counts=True) # flat_idx：返回找到的唯一索引， counts：返回每个唯一索引的计数，更准确的说应该是去重 flat_idx shape is (k,), counts shape is (k,)
+        self.sample_visits[flat_idx] += counts # 更新对应索引的访问次数
 
         start_idx = start_idx.to(device=self.device)
-        idx = start_idx.unsqueeze(-1) + torch.arange(sequence_length, device=self.device)
-        return idx
+        idx = start_idx.unsqueeze(-1) + torch.arange(sequence_length, device=self.device) # start_idx.unsqueeze(-1) shape is (batch_size, 1), torch.arange(sequence_length, device=self.device) shape is (sequence_length,)
+        # idx shape is (batch_size, sequence_length)
+        return idx 
 
     def generate_uniform_indices(self, batch_size, sequence_length, extra=0):
         '''

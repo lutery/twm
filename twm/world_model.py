@@ -94,25 +94,32 @@ class WorldModel(nn.Module):
         return metrics
 
     def optimize(self, o, a, r, terminated, truncated):
+        '''
+        obs shape is [wm_total_batch_size, wm_sequence_length, h, w, c]
+        actions shape is [wm_total_batch_size, wm_sequence_length]
+        rewards shape is [wm_total_batch_size, wm_sequence_length]
+        terminated shape is [wm_total_batch_size, wm_sequence_length]
+        truncated shape is [wm_total_batch_size, wm_sequence_length]
+        '''
         assert utils.same_batch_shape([a, r, terminated, truncated])
         assert utils.same_batch_shape_time_offset(o, r, 1)
 
         obs_model = self.obs_model
         dyn_model = self.dyn_model
 
-        self.eval()
+        self.eval() # 将模型切换为评估模式，避免在编码和解码过程中进行梯度计算
         with torch.no_grad():
-            context_z_dist = obs_model.encode(o[:, :1])
-            context_z = obs_model.sample_z(context_z_dist)
-            next_z_dist = obs_model.encode(o[:, -1:])
-            next_logits = next_z_dist.base_dist.logits
+            context_z_dist = obs_model.encode(o[:, :1]) # 这里仅编码了第一帧，为动态模型提供初始状态，不参与观察模型的重建损失计算
+            context_z = obs_model.sample_z(context_z_dist) # 根据前缀观察的潜在分布进行采样，context_z shape is  (batch_size, 1, z_categoricals * z_categories)
+            next_z_dist = obs_model.encode(o[:, -1:]) # 获取后续观察的潜在分布，也就是最后一个序列的观察，仅编码了最后一帧
+            next_logits = next_z_dist.base_dist.logits # 获取后续观察的潜在分布的logits，next_logits shape is (batch_size, 1, z_categoricals, z_categories)
 
-        self.train()
+        self.train() # 将模型切换为训练模式，开始进行梯度计算和优化
 
         # observation model
-        o = o[:, 1:-1]
+        o = o[:, 1:-1] # 这里应该是去除了第一帧和最后一帧
         z_dist = obs_model.encode(o)
-        z = obs_model.sample_z(z_dist, reparameterized=True) # 这里返回的是对应的潜在分布的采样结果，z shape is (batch_size, time, z_categoricals * z_categories)
+        z = obs_model.sample_z(z_dist, reparameterized=True) # 这里返回的是对应的潜在分布的采样结果，z shape is (batch_size, wm_sequence_length - 2, z_categoricals * z_categories)
         recons = obs_model.decode(z)
 
         dec_loss, dec_met = obs_model.compute_decoder_loss(recons, o) # 计算重构损失和指标
@@ -120,13 +127,13 @@ class WorldModel(nn.Module):
 
         # dynamics model
         z = z.detach()
-        z = torch.cat([context_z, z], dim=1)
-        z_logits = z_dist.base_dist.logits
-        target_logits = torch.cat([z_logits[:, 1:].detach(), next_logits.detach()], dim=1)
-        d = torch.logical_or(terminated, truncated)
-        g = self.to_discounts(terminated)
-        target_weights = (~d[:, 1:]).float()
-        tgt_length = target_logits.shape[1]
+        z = torch.cat([context_z, z], dim=1) # 将第一帧的潜在分布和后续帧的潜在分布拼接起来，z shape is (batch_size, wm_sequence_length - 1, z_categoricals * z_categories)
+        z_logits = z_dist.base_dist.logits # z_logits shape is (batch_size, wm_sequence_length - 2, z_categoricals, z_categories)
+        target_logits = torch.cat([z_logits[:, 1:].detach(), next_logits.detach()], dim=1) # 这里是将中间帧和最后一帧的潜在分布的logits拼接起来，target_logits shape is (batch_size, wm_sequence_length - 2 + 1, z_categoricals, z_categories)
+        d = torch.logical_or(terminated, truncated) # d shape is (batch_size, wm_sequence_length)，表示是否结束的标志
+        g = self.to_discounts(terminated) # g shape is (batch_size, wm_sequence_length)，获取一个折扣矩阵，并且如果terminated对应的位置为true，表示结束，折扣应为0
+        target_weights = (~d[:, 1:]).float() # target_weights shape is (batch_size, wm_sequence_length - 2)，表示非结束状态的权重
+        tgt_length = target_logits.shape[1] # wm_sequence_length - 2 + 1
 
         preds, h, mems = dyn_model.predict(z, a, r[:, :-1], g[:, :-1], d[:, :-1], tgt_length, compute_consistency=True)
         dyn_loss, dyn_met = dyn_model.compute_dynamics_loss(
@@ -524,6 +531,18 @@ class DynamicsModel(nn.Module):
         inputs = {'z': z, 'a': a, 'r': r, 'g': g}
         heads = tuple(heads) if heads is not None else ('z', 'r', 'g')
 
+        '''
+        out shape is {
+            'z': (batch_size, tgt_length / num_modalities, z_dim),
+            'r': (batch_size, tgt_length / num_modalities, 1),
+            'g': (batch_size, tgt_length / num_modalities, 1)
+        }
+        hiddens shape is (batch_size, tgt_length / num_modalities, dim)
+        mems shape is [num_layers + 1, mem_length, batch_size, dim]
+        这里的tgt_length / num_modalities 是因为每个模态的输出都是在最后一个位置进行预测的，所以需要除以模态数量
+
+        这里的输出应该是预测下一个状态的潜在分布、奖励和折扣
+        '''
         outputs = self.prediction_net(
             inputs, tgt_length, stop_mask=d, heads=heads, mems=mems, return_attention=return_attention)
         out, h, mems, attention = outputs if return_attention else (outputs + (None,))
@@ -533,32 +552,32 @@ class DynamicsModel(nn.Module):
         if 'z' in heads:  # latent states
             z_categoricals = config['z_categoricals']
             z_categories = config['z_categories']
-            z_logits = out['z'].unflatten(-1, (z_categoricals, z_categories))
+            z_logits = out['z'].unflatten(-1, (z_categoricals, z_categories)) # z_logits shape is (batch_size, tgt_length / num_modalities, z_categoricals, z_categories)
 
             if compute_consistency:
                 # used for consistency loss
-                preds['z_hat_probs'] = ObservationModel.create_z_dist(z_logits[:, :-1].detach()).base_dist.probs
-                z_logits = z_logits[:, 1:]  # remove context
+                preds['z_hat_probs'] = ObservationModel.create_z_dist(z_logits[:, :-1].detach()).base_dist.probs 
+                z_logits = z_logits[:, 1:]  # remove context 移除第一帧 todo  z_lgoits shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories)
 
-            z_dist = ObservationModel.create_z_dist(z_logits)
+            z_dist = ObservationModel.create_z_dist(z_logits) # 创建中间的潜在分布
             preds['z_dist'] = z_dist
 
-        if 'r' in heads:  # rewards
+        if 'r' in heads:  # rewards todo 调试观察这边的shape
             r_params = out['r']
             if compute_consistency:
-                r_params = r_params[:, 1:]  # remove context
-            r_mean = r_params.squeeze(-1)
-            r_dist = D.Normal(r_mean, torch.ones_like(r_mean))
+                r_params = r_params[:, 1:]  # remove context 移除第一帧 r_params shape is (batch_size, tgt_length / num_modalities - 1, 1)
+            r_mean = r_params.squeeze(-1) # r_mean shape is (batch_size, tgt_length / num_modalities - 1)
+            r_dist = D.Normal(r_mean, torch.ones_like(r_mean)) 
 
             r_pred = r_dist.mean
-            preds['r_dist'] = r_dist  # used for dynamics loss
-            preds['r'] = r_pred
+            preds['r_dist'] = r_dist  # used for dynamics loss 中间状态的奖励分布，用于计算动态损失
+            preds['r'] = r_pred # 
 
         if 'g' in heads:  # discounts
             g_params = out['g']
             if compute_consistency:
-                g_params = g_params[:, 1:]  # remove context
-            g_mean = g_params.squeeze(-1)
+                g_params = g_params[:, 1:]  # remove context 只保留第一帧的折扣
+            g_mean = g_params.squeeze(-1) # g_mean shape is (batch_size, tgt_length / num_modalities, 1)
             g_dist = D.Bernoulli(logits=g_mean)
 
             g_pred = torch.clip(g_dist.mean, 0, 1)

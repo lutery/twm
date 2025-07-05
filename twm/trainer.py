@@ -335,7 +335,15 @@ class Trainer:
         # train wm
         for _ in range(config['wm_train_steps']):
             metrics_i = {}
-            idx = replay_buffer.sample_indices(config['wm_batch_size'], config['wm_sequence_length'])
+            idx = replay_buffer.sample_indices(config['wm_batch_size'], config['wm_sequence_length']) # idx shape is wm_batch_size, wm_sequence_length 得到采样的索引
+            '''
+            obs shape is [wm_total_batch_size, wm_sequence_length, h, w, c]
+            actions shape is [wm_total_batch_size, wm_sequence_length]
+            rewards shape is [wm_total_batch_size, wm_sequence_length]
+            terminated shape is [wm_total_batch_size, wm_sequence_length]
+            truncated shape is [wm_total_batch_size, wm_sequence_length]
+            timesteps shape is [wm_total_batch_size, wm_sequence_length]
+            '''
             o, a, r, terminated, truncated, _ = \
                 replay_buffer.get_data(idx, device=device, prefix=1, return_next_obs=True)  # 1 for context
 

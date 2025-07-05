@@ -652,6 +652,16 @@ class PredictionNet(nn.Module):
     def __init__(self, modality_order, num_current, embeds, out_heads, embed_dim, activation, norm, dropout_p,
                  feedforward_dim, head_dim, num_heads, num_layers, memory_length, max_length):
         '''
+        PredictionNet 是 TWM (Transformer World Model) 中的核心组件，它负责预测环境的动态变化。让我详细解析其作用和工作机制：
+
+        1. 基本作用
+        PredictionNet 是动态模型的核心，用于预测：
+
+        下一个潜在状态 (z)
+        未来奖励 (r)
+        未来折扣因子 (g)
+        它接收当前状态和动作等输入，预测环境的未来发展。
+
         modality_order: ['z', 'a', 'r'(存在config: dyn_input_rewards则有), 'g'(存在dyn_input_discounts则有)]
         num_current: 2
         embeds: {'z': {'in_dim': z_dim, 'categorical': False}, 'a': {'in_dim': num_actions, 'categorical': True}, 'r'(config: dyn_input_rewards): {'in_dim': 0, 'categorical': False}, 'g'(dyn_input_discounts): {'in_dim': 0, 'categorical': False}}
@@ -775,7 +785,7 @@ class PredictionNet(nn.Module):
         return src_mask # 返回最终组合的掩码，用于Transformer的注意力机制。
 
     def forward(self, inputs, tgt_length, stop_mask, heads=None, mems=None, return_attention=False):
-                '''
+        '''
         1: inputs: {
             'z': z, shape is (1, sequence_length + extra - 1, z_categoricals * z_categories)
             'a': a, shape is (1, sequence_length + extra - 2)

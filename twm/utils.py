@@ -134,10 +134,22 @@ def random_choice(n, num_samples, replacement=False, device=None):
 
 
 def windows(x, window_size, window_stride=1):
+    '''
+    dimension: 要展开的维度
+    size: 每个窗口的大小
+    step: 窗口之间的步长
+
+    方法沿指定维度创建一系列固定大小的滑动窗口，将原始张量展开为一个更高维的张量，其中新增的最后一个维度包含所有提取的窗口
+
+    假设 x 的形状是 [32, 100, 64] window_size=10, window_stride=5
+    x.unfold(1, 10, 5) 在时间维度上创建大小为10、步长为5的窗口
+    结果形状: [32, 19, 64, 10]（19 = (100-10)/5 + 1）
+
+    '''
     x = x.unfold(1, window_size, window_stride)
-    dims = list(range(x.ndim))[:-1]
-    dims.insert(2, x.ndim - 1)
-    x = x.permute(dims)
+    dims = list(range(x.ndim))[:-1] # 获取除了最后一个维度的所有维度
+    dims.insert(2, x.ndim - 1) # 将最后一个维度移动到第三个位置
+    x = x.permute(dims) # 操作重排维度，使窗口维度在第三位 结果形状: [32, 19, 10, 64]
     return x
 
 

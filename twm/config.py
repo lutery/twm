@@ -48,7 +48,7 @@ CONFIGS['default'] = {
     'obs_grad_clip': 100,
     'obs_entropy_coef': 5,
     'obs_entropy_threshold': 0.1,
-    'obs_consistency_coef': 0.01,
+    'obs_consistency_coef': 0.01, # 表示是否计算一致性损失
     'obs_decoder_coef': 1,
 
     'dyn_embed_dim': 256,

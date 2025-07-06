@@ -135,20 +135,67 @@ class WorldModel(nn.Module):
         target_weights = (~d[:, 1:]).float() # target_weights shape is (batch_size, wm_sequence_length - 2)，表示非结束状态的权重
         tgt_length = target_logits.shape[1] # wm_sequence_length - 2 + 1
 
+        '''
+        preds shape is {
+            'z': (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories),
+            'r_dist': (batch_size, tgt_length / num_modalities - 1, 1),
+            'r': (batch_size, tgt_length / num_modalities - 1, 1),
+            'g_dist': (batch_size, tgt_length / num_modalities - 1, 1)
+            'g': (batch_size, tgt_length / num_modalities - 1, 1)
+        }
+
+        h shape is (batch_size, tgt_length / num_modalities, dim)
+        mems shape is [num_layers + 1, mem_length, batch_size, dim]
+        attention shape is [num_layers, batch_size, num_heads, tgt_length / num_modalities, tgt_length / num_modalities]
+        如果 return_attention 为True，则返回注意力权重，否则只返回预测结果和隐藏状态
+        '''
         preds, h, mems = dyn_model.predict(z, a, r[:, :-1], g[:, :-1], d[:, :-1], tgt_length, compute_consistency=True)
+
+        # 动态模型损失计算，主要是计算环境模型的潜在状态预测损失、奖励预测损失和折扣预测损失
         dyn_loss, dyn_met = dyn_model.compute_dynamics_loss(
             preds, h, target_logits=target_logits, target_r=r[:, 1:], target_g=g[:, 1:], target_weights=target_weights)
         self.dyn_optimizer.step(dyn_loss)
 
         z_hat_probs = preds['z_hat_probs'].detach()
+        '''
+        z_logits shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories)
+        z_hat_probs shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories)
+
+        简单来说，一致性损失是保证环境模型的编码接近predict模型的对环境的预测编码，两者传入的时间序列是相同的
+        而compute_dynamics_loss是保证predict模型的对环境的预测编码接近环境模型的编码，时间序列是有偏差一个时间步的
+        '''
         con_loss, con_met = obs_model.compute_consistency_loss(z_logits, z_hat_probs)
 
+        # 汇总所有损失进行训练
         obs_loss = dec_loss + ent_loss + con_loss
         self.obs_optimizer.step(obs_loss)
 
         metrics = utils.combine_metrics([dec_met, ent_met, con_met, dyn_met])
         metrics['obs_loss'] = obs_loss.detach()
 
+        '''
+        z shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals * z_categories)
+        h shape is (batch_size, tgt_length / num_modalities, h_dim)
+        metrics shape is {
+            'obs_loss': obs_loss,
+            'enc_prior_ce': cross_entropy.detach().mean(),
+            'enc_prior_loss': loss.detach(),
+            'enc_decoder_loss': dec_loss.detach(),
+            'enc_entropy_loss': ent_loss.detach(),
+            'dyn_loss': dyn_loss.detach(),
+            'dyn_r_loss': dyn_met['dyn_r_loss'].detach(),
+            'dyn_g_loss': dyn_met['dyn_g_loss'].detach(),
+            'dyn_r_ce': dyn_met['dyn_r_ce'].detach(),
+            'dyn_g_ce': dyn_met['dyn_g_ce'].detach(),
+            'dyn_r_mse': dyn_met['dyn_r_mse'].detach(),
+            'dyn_g_mse': dyn_met['dyn_g_mse'].detach(),
+            'dyn_enc_prior_ce': dyn_met['dyn_enc_prior_ce'].detach(),
+            'dyn_enc_prior_loss': dyn_met['dyn_enc_prior_loss'].detach(),
+            'enc_consistency_loss': con_loss.detach(),
+            'enc_consistency_ce': con_met['enc_consistency_ce'].detach(),
+            'enc_consistency_loss': con_met['enc_consistency_loss'].detach()
+        }
+        '''
         return z, h, metrics
 
     @torch.no_grad()
@@ -444,17 +491,22 @@ class ObservationModel(nn.Module):
         return loss, metrics
 
     def compute_consistency_loss(self, z_logits, z_hat_probs):
+        '''
+        z_logits shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories)
+        z_hat_probs shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories)
+        '''
         assert utils.check_no_grad(z_hat_probs)
         config = self.config
         metrics = {}
         coef = config['obs_consistency_coef']
         if coef > 0:
-            cross_entropy = -((z_hat_probs.detach() * z_logits).sum(-1))
+            cross_entropy = -((z_hat_probs.detach() * z_logits).sum(-1)) # 计算交叉熵损失，
             cross_entropy = cross_entropy.sum(-1)  # independent
             loss = coef * cross_entropy.mean()
             metrics['enc_prior_ce'] = cross_entropy.detach().mean()
             metrics['enc_prior_loss'] = loss.detach()
         else:
+            # 这里表示不计算一致性损失
             loss = torch.zeros(1, device=z_logits.device, requires_grad=False)
         return loss, metrics
 
@@ -541,7 +593,7 @@ class DynamicsModel(nn.Module):
         mems shape is [num_layers + 1, mem_length, batch_size, dim]
         这里的tgt_length / num_modalities 是因为每个模态的输出都是在最后一个位置进行预测的，所以需要除以模态数量
 
-        这里的输出应该是预测下一个状态的潜在分布、奖励和折扣
+        这里的输出应该是预测下一个状态的潜在分布、奖励和折扣，而不是样本分布，后续会将后续这些转换为采样分布
         '''
         outputs = self.prediction_net(
             inputs, tgt_length, stop_mask=d, heads=heads, mems=mems, return_attention=return_attention)
@@ -567,23 +619,37 @@ class DynamicsModel(nn.Module):
             if compute_consistency:
                 r_params = r_params[:, 1:]  # remove context 移除第一帧 r_params shape is (batch_size, tgt_length / num_modalities - 1, 1)
             r_mean = r_params.squeeze(-1) # r_mean shape is (batch_size, tgt_length / num_modalities - 1)
-            r_dist = D.Normal(r_mean, torch.ones_like(r_mean)) 
+            r_dist = D.Normal(r_mean, torch.ones_like(r_mean)) # r_dist shape is (batch_size, tgt_length / num_modalities - 1, 1)，使用均值和标准差为1的正态分布
 
-            r_pred = r_dist.mean
+            r_pred = r_dist.mean # r_pred shape is (batch_size, tgt_length / num_modalities - 1)，将奖励预测值限制在0和1之间
             preds['r_dist'] = r_dist  # used for dynamics loss 中间状态的奖励分布，用于计算动态损失
             preds['r'] = r_pred # 
 
         if 'g' in heads:  # discounts
             g_params = out['g']
             if compute_consistency:
-                g_params = g_params[:, 1:]  # remove context 只保留第一帧的折扣
-            g_mean = g_params.squeeze(-1) # g_mean shape is (batch_size, tgt_length / num_modalities, 1)
-            g_dist = D.Bernoulli(logits=g_mean)
+                g_params = g_params[:, 1:]  # remove context 移除第一帧的折扣
+            g_mean = g_params.squeeze(-1) # g_mean shape is (batch_size, tgt_length / num_modalities - 1, 1)
+            g_dist = D.Bernoulli(logits=g_mean) # 利用折扣均值做为伯努利分布的logits，g_dist shape is (batch_size, tgt_length / num_modalities - 1, 1)
 
-            g_pred = torch.clip(g_dist.mean, 0, 1)
+            g_pred = torch.clip(g_dist.mean, 0, 1) # g_pred shape is (batch_size, tgt_length / num_modalities - 1, 1)，将折扣预测值限制在0和1之间
             preds['g_dist'] = g_dist  # used for dynamics loss
             preds['g'] = g_pred
 
+        '''
+        preds shape is {
+            'z': (batch_size, tgt_length / num_modalities - 1, z_categoricals, z_categories),
+            'r_dist': (batch_size, tgt_length / num_modalities - 1, 1),
+            'r': (batch_size, tgt_length / num_modalities - 1, 1),
+            'g_dist': (batch_size, tgt_length / num_modalities - 1, 1)
+            'g': (batch_size, tgt_length / num_modalities - 1, 1)
+        }
+
+        h shape is (batch_size, tgt_length / num_modalities, dim)
+        mems shape is [num_layers + 1, mem_length, batch_size, dim]
+        attention shape is [num_layers, batch_size, num_heads, tgt_length / num_modalities, tgt_length / num_modalities]
+        如果 return_attention 为True，则返回注意力权重，否则只返回预测结果和隐藏状态
+        '''
         return (preds, h, mems, attention) if return_attention else (preds, h, mems)
 
     def compute_dynamics_loss(self, preds, h, target_logits, target_r, target_g, target_weights):
@@ -591,6 +657,8 @@ class DynamicsModel(nn.Module):
         preds: 预测的结果，包含潜在状态、奖励和折扣 shape
         {
             'z': (batch_size, tgt_length / num_modalities, z_dim),
+            'z_dist': (batch_size, tgt_length / num_modalities, z_categoricals, z_categories),
+            'r_dist': (batch_size, tgt_length / num_modalities, 1),
             'r': (batch_size, tgt_length / num_modalities, 1),
             'g': (batch_size, tgt_length / num_modalities, 1)
         }
@@ -623,7 +691,7 @@ class DynamicsModel(nn.Module):
 
             # doesn't check for q == 0
             target_probs = logits_to_probs(target_logits)
-            cross_entropy = -((target_probs * z_logits).sum(-1)) # 目标的潜在状态 logits 和预测的潜在状态 logits 之间的交叉熵损失
+            cross_entropy = -((target_probs * z_logits).sum(-1)) # 目标的潜在状态 logits 和预测的潜在状态 logits 之间的交叉熵损失，todo 这边应该是对比世界模型编码的潜在状态和动态模型预测的潜在状态是否一致
             cross_entropy = cross_entropy.sum(-1)  # independent
             weighted_cross_entropy = target_weights * cross_entropy # 如果是中断状态则权重为0，否则为1
             weighted_cross_entropy = weighted_cross_entropy.sum() / target_weights.sum() # 计算加权交叉熵损失的平均值

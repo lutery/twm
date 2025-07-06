@@ -114,14 +114,20 @@ class Trainer:
         return policy
 
     def _create_start_z_sampler(self, temperature):
+        '''
+        接收参数 [temperature]trainer.py )，控制采样的随机程度
+
+        较高的温度：更随机的采样
+        较低的温度（接近0）：更确定性的采样 todo 验证
+        '''
         obs_model = self.agent.wm.obs_model
         replay_buffer = self.replay_buffer
 
         @torch.no_grad()
         def sampler(n):
             idx = utils.random_choice(replay_buffer.size, n, device=replay_buffer.device)
-            o = replay_buffer.get_obs(idx).unsqueeze(1)
-            z = obs_model.eval().encode_sample(o, temperature=temperature).squeeze(1)
+            o = replay_buffer.get_obs(idx).unsqueeze(1) # 从经验回放缓冲区随机采样观察数据
+            z = obs_model.eval().encode_sample(o, temperature=temperature).squeeze(1) # 将观察数据编码为潜在状态表示 [z]trainer.py )，调整采样的随机性（通过[temperature]trainer.py )参数）
             return z
 
         return sampler
@@ -347,34 +353,59 @@ class Trainer:
             o, a, r, terminated, truncated, _ = \
                 replay_buffer.get_data(idx, device=device, prefix=1, return_next_obs=True)  # 1 for context
 
+            '''
+            这里开始训练世界模型和预测模型
+
+            z shape is (batch_size, tgt_length / num_modalities - 1, z_categoricals * z_categories)
+            h shape is (batch_size, tgt_length / num_modalities, h_dim)
+            '''
             z, h, met = wm.optimize(o, a, r, terminated, truncated)
             utils.update_metrics(metrics_i, met, prefix='wm/')
 
             o, a, r, terminated, truncated = [x[:, :-1] for x in (o, a, r, terminated, truncated)]
+            '''
+            o shape is [wm_total_batch_size, wm_sequence_length - 1, h, w, c]
+            a shape is [wm_total_batch_size, wm_sequence_length - 1]
+            r shape is [wm_total_batch_size, wm_sequence_length - 1]
+            terminated shape is [wm_total_batch_size, wm_sequence_length - 1]
+            truncated shape is [wm_total_batch_size, wm_sequence_length - 1]
+            '''
 
         metrics = metrics_i  # only use last metrics
 
-        # train actor-critic
+        # train actor-critic 这里就是开始训练动作价值网络
+        # 以下应该就是利用滑动窗口，将环境分为每2个时间步的样本后，再对应上环境状态变化后的奖励，执行的动作，中断，结束状态
+        # todo 调试验证这边的shape是否正确
         create_start = lambda x, size: utils.windows(x, size).flatten(0, 1)
-        start_z = create_start(z, 2)
-        start_a = create_start(a, 1)
-        start_r = create_start(r, 1)
-        start_terminated = create_start(terminated, 1)
-        start_truncated = create_start(truncated, 1)
+        start_z = create_start(z, 2) # start_z shape is (batch_size * num_windows, z_categoricals * z_categories)
+        start_a = create_start(a, 1) # start_a shape is (batch_size * num_windows, num_actions)
+        start_r = create_start(r, 1) # start_r shape is (batch_size * num_windows, 1)
+        start_terminated = create_start(terminated, 1) # start_terminated shape is (batch_size * num_windows, 1)
+        start_truncated = create_start(truncated, 1) # start_truncated shape is (batch_size * num_windows, 1)
 
+        # 随机选择config['ac_batch_size']个样本进行训练
         idx = utils.random_choice(start_z.shape[0], config['ac_batch_size'], device=start_z.device)
         start_z, start_a, start_r, start_terminated, start_truncated = \
             [x[idx] for x in (start_z, start_a, start_r, start_terminated, start_truncated)]
+        '''
+        start_z shape is (ac_batch_size, z_categoricals * z_categories)
+        start_a shape is (ac_batch_size, num_actions)
+        start_r shape is (ac_batch_size, 1)
+        start_terminated shape is (ac_batch_size, 1)
+        start_truncated shape is (ac_batch_size, 1)
+        '''
 
         dreamer = Dreamer(config, wm, mode='imagine', ac=ac, store_data=True,
                           start_z_sampler=self._create_start_z_sampler(temperature=1))
         dreamer.imagine_reset(start_z, start_a, start_r, start_terminated, start_truncated)
         for _ in range(config['ac_horizon']):
-            a = dreamer.act()
-            dreamer.imagine_step(a)
+            a = dreamer.act() # 这里随机选择动作，但是不进行反向传说
+            dreamer.imagine_step(a) # 这里面累计每一次的想象，仅根据动作和初始的状态
+        # 获取想象轨迹结果
         z, o, h, a, r, g, d, weights = dreamer.get_data()
         if config['wm_discount_threshold'] == 0:
             d = None  # save some computation, since all dones are False in this case
+        # 这里训练AC，动作策略网络不再真实的观察中测试，而是在想象的轨迹中吗？todo
         ac_metrics = ac.optimize(z, h, a, r, g, d, weights)
         utils.update_metrics(metrics, ac_metrics, prefix='ac/')
 
@@ -382,7 +413,9 @@ class Trainer:
 
     @torch.no_grad()
     def _evaluate(self, is_final):
-        # todo 后续调试查看
+        '''
+        is_final: 是否是最终评估，从这里看true或者false的区别仅仅只是dreamer的想象长度
+        '''
         start_time = time.time()
         config = self.config
         agent = self.agent
@@ -394,12 +427,14 @@ class Trainer:
         metrics = {}
         metrics['buffer/visits'] = replay_buffer.visit_histogram()
         metrics['buffer/sample_probs'] = replay_buffer.sample_probs_histogram()
+        # 验证世界模型的想象效果，用真实图片
         recon_img, imagine_img = self._create_eval_images(is_final)
         metrics['eval/recons'] = wandb.Image(recon_img)
         if imagine_img is not None:
             metrics['eval/imagine'] = wandb.Image(imagine_img)
 
         # similar to evaluation proposed in https://arxiv.org/pdf/2007.05929.pdf (SPR) section 4.1
+        # 创建多个环境用于评估，但是采用的是向量环境
         num_episodes = config['final_eval_episodes'] if is_final else config['eval_episodes']
         num_envs = max(min(num_episodes, int(multiprocessing.cpu_count() * config['cpu_p'])), 1)
         env_fn = lambda: Trainer._create_env_from_config(config, eval=True)
@@ -410,18 +445,19 @@ class Trainer:
         start_obs = utils.preprocess_atari_obs(start_obs, device).unsqueeze(1)
 
         dreamer = Dreamer(config, wm, mode='observe', ac=ac, store_data=False)
+        # 这里是观察重置，主要是将初始的观察数据传入到dreamer中，唯一不同的地方就是单条数据
         dreamer.observe_reset_single(start_obs)
 
         scores = []
         current_scores = np.zeros(num_envs)
-        finished = np.zeros(num_envs, dtype=bool)
+        finished = np.zeros(num_envs, dtype=bool) #是否结束
         num_truncated = 0
         while len(scores) < num_episodes:
-            a = dreamer.act()
-            o, r, terminated, truncated, infos = eval_env.step(a.squeeze(1).cpu().numpy())
+            a = dreamer.act() # 想象模型得到的动作
+            o, r, terminated, truncated, infos = eval_env.step(a.squeeze(1).cpu().numpy()) # 执行动作
 
             not_finished = ~finished
-            current_scores[not_finished] += r[not_finished]
+            current_scores[not_finished] += r[not_finished] # 记录分数，如果结束则不再记录，因为时向量环境，所以如果还有没有结束的会继续记录
             lives = infos['lives']
             for i in range(num_envs):
                 if not finished[i]:
@@ -431,16 +467,20 @@ class Trainer:
                     elif terminated[i] and lives[i] == 0:
                         finished[i] = True
 
+            # 将真实的观察数据传入到dreamer中
             o = utils.preprocess_atari_obs(o, device).unsqueeze(1)
             r = torch.as_tensor(r, dtype=torch.float, device=device).unsqueeze(1)
             terminated = torch.as_tensor(terminated, device=device).unsqueeze(1)
             truncated = torch.as_tensor(truncated, device=device).unsqueeze(1)
+            # 想象模型根据真实的观察数据执行一步
             z, h, _, d, _ = dreamer.observe_step(a, o, r, terminated, truncated)
 
             if np.all(finished):
+                # 仅当所有的环境都结束时才重置
                 # only reset if all environments are finished to remove bias for shorter episodes
                 scores.extend(current_scores.tolist())
                 num_scores = len(scores)
+                # 如果已经收集到足够的分数，则截断，过早的分数不纳入统计
                 if num_scores >= num_episodes:
                     if num_scores > num_episodes:
                         scores = scores[:num_episodes]  # unbiased, just pick first
@@ -452,11 +492,13 @@ class Trainer:
                 start_o, _ = eval_env.reset(seed=seed, options={'force': True})
                 start_o = utils.preprocess_atari_obs(start_o, device).unsqueeze(1)
                 dreamer = Dreamer(config, wm, mode='observe', ac=ac, store_data=False)
+                # 想象模型也要重制起始状态
                 dreamer.observe_reset_single(start_o)
         eval_env.close(terminate=True)
         if num_truncated > 0:
             print(f'{num_truncated} episode(s) truncated')
 
+        # 以下就是记录各种指标
         score_mean = np.mean(scores)
         score_metrics = {
             'score_mean': score_mean,
@@ -487,6 +529,7 @@ class Trainer:
         obs_model = agent.wm.obs_model.eval()
 
         # recon_img
+        # 随机从缓冲区采样得到
         idx = utils.random_choice(replay_buffer.size, 10, device=replay_buffer.device).unsqueeze(1)
         o = replay_buffer.get_obs(idx)
         z = obs_model.encode_sample(o, temperature=0)
@@ -494,6 +537,7 @@ class Trainer:
         # use last frame of frame stack
         o = o[:, :, -1:]
         recons = recons[:, :, -1:]
+        # 以下处理彩色观察还是会读观察
         if config['env_grayscale']:
             recon_img = [o.unsqueeze(-3), recons.unsqueeze(-3)]  # unsqueeze channel
         else:
@@ -503,6 +547,7 @@ class Trainer:
         recon_img = utils.to_image(recon_img)
 
         # imagine_img
+        # 仅提取前5个索引
         idx = idx[:5]
         start_o = replay_buffer.get_obs(idx, prefix=1)  # 1 for context
         start_a = replay_buffer.get_actions(idx, prefix=1)[:, :-1]
@@ -511,6 +556,7 @@ class Trainer:
         start_truncated = replay_buffer.get_truncated(idx, prefix=1)[:, :-1]
         start_z = obs_model.encode_sample(start_o, temperature=0)
 
+        # 这边应该是想象的长度
         horizon = 100 if is_final else config['wm_sequence_length']
         dreamer = Dreamer(config, agent.wm, mode='imagine', ac=agent.ac, store_data=True,
                           start_z_sampler=self._create_start_z_sampler(temperature=0), always_compute_obs=True)
@@ -535,6 +581,7 @@ class Trainer:
         imagine_img = utils.make_grid(imagine_img, nrow=o.shape[1], padding=(pad + extra_pad, pad))
         imagine_img = utils.to_image(imagine_img[:, extra_pad:])
 
+        # 这边会绘制世界模型想象的游戏画面
         draw = ImageDraw.Draw(imagine_img)
         h, w = o.shape[3:5]
         for t in range(r.shape[1]):

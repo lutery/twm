@@ -94,7 +94,27 @@ class ActorCritic(nn.Module):
             self.target_critic_model.load_state_dict(self.critic_model.state_dict())
 
     def optimize(self, z, h, a, r, g, d, weights):
+        '''
+        
+        weights: 这里的权重就是折扣矩阵，包含未来多步的折扣而来
+        '''
+        # 它将观察模型的潜在状态和动态模型的隐藏状态组合成适合策略和价值网络使用的输入
+        # 观察模型的潜在状态会根据动态模型的预测得到
+        '''
+        说明了_prepare_inputs方法的核心作用：
+
+        组合两种不同的信息：
+
+        z：潜在状态表示（可能来自观察编码或动态预测）
+        h：动态模型的隐藏状态（包含时序信息）
+        这种组合的好处：
+
+        潜在状态z提供当前观察的紧凑表示
+        隐藏状态h提供历史上下文和动态信息
+        组合后的表示更全面，包含静态和动态特征
+        '''
         x = self._prepare_inputs(z, h)
+        # 计算目标回报Q值和优势
         returns, advantages = self._compute_targets(x, r, g, d)
         self.train()
 
@@ -153,18 +173,27 @@ class ActorCritic(nn.Module):
         return utils.combine_metrics([critic_metrics, actor_metrics])
 
     def _compute_actor_loss(self, logits, a, advantages, weights):
+        '''
+        logits: Actor 网络预测的动作分布 logits shape: (batch_size, sequence_length + extra - 1, num_actions)
+        a: 采样的动作 shape: (batch_size, sequence_length + extra - 1)
+        advantages: 计算的优势值 shape: (batch_size, sequence_length + extra - 1)
+        weights: 每个样本的权重 shape: (batch_size, sequence_length + extra - 1)
+        训练动作网络的损失函数
+        '''
         assert utils.check_no_grad(a, advantages, weights)
+        # 这边就是很想普通ac训练方式
         config = self.config
-        dist = D.Categorical(logits=logits)
-        reinforce = dist.log_prob(a) * advantages
-        reinforce = (weights * reinforce).mean()
+        dist = D.Categorical(logits=logits) # 预测动作动作分布
+        reinforce = dist.log_prob(a) * advantages # 预测的动作分布集合实际的动作得到实际的概率，乘以优势，这样如果对应的动作是优势大的会加大概率，反之则减少
+        reinforce = (weights * reinforce).mean() # 每个样本的权重乘以实际的概率，得到每个样本的损失，最后取平均
         loss = -reinforce
 
-        entropy = weights * dist.entropy()
-        max_entropy = math.log(self.num_actions)
-        normalized_entropy = (entropy / max_entropy).mean()
+        entropy = weights * dist.entropy() # 计算动作分布的熵，表示动作的多样性
+        max_entropy = math.log(self.num_actions) # 最大的动作熵
+        normalized_entropy = (entropy / max_entropy).mean() # 归一化动作熵，表示动作的多样性
         coef = config['actor_entropy_coef']
         if coef != 0:
+            # 如果熵太大，则会将熵归零如果熵低于阈值，则计算距离阈值的距离，保证熵不会过低或者过高
             entropy_reg = coef * torch.relu(config['actor_entropy_threshold'] - normalized_entropy)
             loss = loss + entropy_reg
 
@@ -181,9 +210,10 @@ class ActorCritic(nn.Module):
         weights: 每个样本的权重 shape: (batch_size, sequence_length + extra - 1)
         '''
         assert utils.check_no_grad(returns, weights)
+        # todo 测试使用mse替换这里的训练效果
         value_dist = D.Normal(values, torch.ones_like(values)) # 模拟创建一个符合values的正太分布
         # value_dist.log_prob(returns): 计算 returns 在正态分布下的对数概率，计算离values的距离，因为正太分布的概率就是离均值的距离
-        # weights: 每个样本的权重，在预训练时，这里是全1
+        # weights: 每个样本的权重，在预训练时，这里是全1/在正式训练时为折扣小数
         # loss: 计算损失，使用负对数似然损失，表示预测的值与目标值之间的距离
         # mean()：对所有样本的损失取平均
         loss = -(weights * value_dist.log_prob(returns)).mean() 
@@ -255,11 +285,22 @@ class ActorCritic(nn.Module):
 
     @torch.no_grad()
     def policy(self, z, h, temperature=1):
+        '''
+        z: 环境的编码特征 shape is (batch_size, sequence_length + extra, z_categoricals * z_categories)
+        h: transformer的输出 shape is (batch_size, sequence_length + extra, dyn_embed_dim)
+        temperature: 温度参数，控制动作的随机性，0表示贪婪选择，1表示随机选择
+        返回动作的索引
+        这里的z和h是最后一个时间步的状态和transformer的输出
+        '''
         assert utils.check_no_grad(z, h)
+        # 这里设置为评估模式，表示不进行梯度计算，也就是不进行反向传播
         self.eval()
+        # 这里看起来是将z和h组合起来
         x = self._prepare_inputs(z, h)
+        # 直接进行动作概率的分布预测
         logits = self.actor(x)
-
+        
+        # 是随机选择还是贪婪选择
         if temperature == 0:
             actions = logits.argmax(dim=-1)
         else:

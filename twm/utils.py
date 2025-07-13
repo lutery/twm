@@ -303,7 +303,9 @@ class EpisodicLives(gym.Wrapper):
 
 class NoAutoReset(gym.Wrapper):
     '''
-    todo 这个包装器的作用是什么？
+    这个包装器的作用是什么？
+    是一个 Gym 环境包装器，它的主要作用是防止环境在 episode 结束时自动重置，主要针对的gym向量环境
+    因为在向量环境中时会自动reset的
     '''
 
     def __init__(self, env):

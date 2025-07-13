@@ -74,6 +74,7 @@ class Trainer:
             config['env_frame_size'], config['env_episodic_lives'], config['env_grayscale'], config['env_time_limit'])
         if eval:
             # 如果是验证模式下，这里还是需要额外包装一个NoAutoReset包装器
+            # 因为验证模式采用的是向量环境，向量的环境在每个episode结束后会自动重置
             env = utils.NoAutoReset(env)  # must use options={'force': True} to really reset
         return env
 
